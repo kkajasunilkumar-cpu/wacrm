@@ -180,7 +180,7 @@ export async function sendWhatsAppReply(
 ): Promise<boolean> {
   try {
     const response = await fetch(
-      `https://graph.facebook.com/v19.0/${phoneNumberId}/messages`,
+      `https://graph.facebook.com/v25.0/${phoneNumberId}/messages`,
       {
         method: "POST",
         headers: {
