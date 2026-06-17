@@ -191,18 +191,29 @@ export async function sendWhatsAppReply(
           messaging_product: "whatsapp",
           recipient_type: "individual",
           to,
-          type: "text",
-          text: { body: message },
+          type: "interactive",
+          interactive: {
+            type: "button",
+            body: { text: message },
+            action: {
+              buttons: [
+                {
+                  type: "reply",
+                  reply: { id: "TALK_TO_AGENT", title: "Talk to Agent 👤" }
+                },
+                {
+                  type: "reply",
+                  reply: { id: "KNOW_MORE", title: "Know More 📚" }
+                }
+              ]
+            }
+          }
         }),
       }
     );
 
     const result = await response.json();
-    
-    // Log FULL Meta response for debugging
     console.log("Meta API full response:", JSON.stringify(result));
-    console.log("HTTP status:", response.status);
-    
     if (result.messages?.[0]?.id) {
       console.log("AI reply sent successfully:", result.messages[0].id);
       return true;
