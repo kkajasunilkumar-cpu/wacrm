@@ -172,7 +172,6 @@ export async function getAIReply(
     return null;
   }
 }
-
 export async function sendWhatsAppReply(
   phoneNumberId: string,
   accessToken: string,
@@ -199,11 +198,16 @@ export async function sendWhatsAppReply(
     );
 
     const result = await response.json();
+    
+    // Log FULL Meta response for debugging
+    console.log("Meta API full response:", JSON.stringify(result));
+    console.log("HTTP status:", response.status);
+    
     if (result.messages?.[0]?.id) {
       console.log("AI reply sent successfully:", result.messages[0].id);
       return true;
     }
-    console.error("Failed to send AI reply:", result);
+    console.error("Failed to send AI reply:", JSON.stringify(result));
     return false;
   } catch (error) {
     console.error("Send WhatsApp reply error:", error);
