@@ -7,6 +7,7 @@ import { findExistingContact, isUniqueViolation } from '@/lib/contacts/dedupe'
 import { verifyMetaWebhookSignature } from '@/lib/whatsapp/webhook-signature'
 import { runAutomationsForTrigger } from '@/lib/automations/engine'
 import { dispatchInboundToFlows } from '@/lib/flows/engine'
+import { getAIReply, sendWhatsAppReply } from '@/lib/ai-agent'
 import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
@@ -713,6 +714,34 @@ async function processMessage(
       },
     }).catch((err) => console.error('[automations] dispatch failed:', err))
   }
+  // ── KBEduTech AI Agent ──────────────────────────────────────
+  if (message.type === 'text' && !interactiveReplyId && contentText && process.env.OPENAI_API_KEY) {
+    ;(async () => {
+      try {
+        const aiReply = await getAIReply(contentText, senderPhone)
+        if (!aiReply) return
+        await supabaseAdmin().from('messages').insert({
+          conversation_id: conversation.id,
+          sender_type: 'agent',
+          content_type: 'text',
+          content_text: aiReply,
+          message_id: `ai-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          status: 'sent',
+          created_at: new Date().toISOString(),
+        })
+        await sendWhatsAppReply(config.phone_number_id, decryptedAccessToken, message.from, aiReply)
+        await supabaseAdmin().from('conversations').update({
+          last_message_text: aiReply,
+          last_message_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }).eq('id', conversation.id)
+        console.log('[AI Agent] Replied to:', message.from)
+      } catch (err) {
+        console.error('[AI Agent] Error:', err)
+      }
+    })()
+  }
+  // ── End AI Agent ─────────────────────────────────────────────
 }
 
 async function parseMessageContent(
