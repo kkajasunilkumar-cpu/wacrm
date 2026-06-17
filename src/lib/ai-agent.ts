@@ -189,7 +189,6 @@ export async function sendWhatsAppReply(
         },
         body: JSON.stringify({
           messaging_product: "whatsapp",
-          recipient_type: "individual",
           to,
           type: "interactive",
           interactive: {
