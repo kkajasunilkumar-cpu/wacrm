@@ -731,7 +731,7 @@ async function processMessage(
           status: 'sent',
           created_at: new Date().toISOString(),
         })
-        await sendWhatsAppReply(phoneNumberId, decryptedAccessToken, message.from, aiReply)
+        await sendWhatsAppReply(phoneNumberId, accessToken, message.from, aiReply)
         await supabaseAdmin().from('conversations').update({
           last_message_text: aiReply,
           last_message_at: new Date().toISOString(),
