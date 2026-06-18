@@ -13,7 +13,11 @@ import {
   isTemplateWebhookField,
 } from '@/lib/whatsapp/template-webhook'
 
-// Lazy-initialized to avoid build-time crash when env vars are missing
+// File path: src/app/api/whatsapp/webhook/route.ts
+// Hybrid bot logic:
+// Static replies for greeting, name/location, university, courses, fees, office.
+// OpenAI is called only after the user chooses "Others" and sends a custom question.
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _adminClient: any = null
 
@@ -27,6 +31,14 @@ function supabaseAdmin() {
 
   return _adminClient
 }
+
+type BotStage =
+  | 'waiting_for_name_location'
+  | 'waiting_for_university'
+  | 'waiting_for_menu_choice'
+  | 'waiting_for_custom_question'
+
+type UniversityKey = 'chettinad' | 'kalasalingam'
 
 interface WhatsAppMessage {
   id: string
@@ -92,6 +104,443 @@ interface WhatsAppWebhookEntry {
   }>
 }
 
+interface BotState {
+  stage: BotStage
+  selectedUniversity?: UniversityKey
+  name?: string
+  location?: string
+}
+
+// NOTE: In-memory state resets when server restarts.
+// For production, move this state to Supabase columns/table.
+const botStateMemory: Record<string, BotState> = {}
+
+const UNIVERSITY_LABELS: Record<UniversityKey, string> = {
+  chettinad: 'Chettinad Academy of Research and Education',
+  kalasalingam: 'Kalasalingam Academy of Research and Education',
+}
+
+const UNIVERSITY_SELECTION_ALIASES: Record<string, UniversityKey> = {
+  '1': 'chettinad',
+  chettinad: 'chettinad',
+  'chettinad university': 'chettinad',
+  care: 'chettinad',
+  'chettinad academy of research and education': 'chettinad',
+  button_chettinad: 'chettinad',
+
+  '2': 'kalasalingam',
+  kalasalingam: 'kalasalingam',
+  'kalasalingam university': 'kalasalingam',
+  kare: 'kalasalingam',
+  'kalasalingam academy of research and education': 'kalasalingam',
+  button_kalasalingam: 'kalasalingam',
+}
+
+const MENU_ALIASES: Record<string, 'courses' | 'fees' | 'office' | 'others'> = {
+  '1': 'courses',
+  courses: 'courses',
+  course: 'courses',
+  programmes: 'courses',
+  programs: 'courses',
+  button_courses: 'courses',
+
+  '2': 'fees',
+  fees: 'fees',
+  fee: 'fees',
+  scholarship: 'fees',
+  scholarships: 'fees',
+  hostel: 'fees',
+  button_fees: 'fees',
+
+  '3': 'office',
+  'administration office': 'office',
+  office: 'office',
+  location: 'office',
+  address: 'office',
+  contact: 'office',
+  button_office: 'office',
+
+  '4': 'others',
+  others: 'others',
+  other: 'others',
+  custom: 'others',
+  question: 'others',
+  button_others: 'others',
+}
+
+function normalizeChoice(input: string | null | undefined): string {
+  return (input || '').trim().toLowerCase()
+}
+
+function getInteractiveReplyId(message: WhatsAppMessage): string | null {
+  return (
+    message.interactive?.button_reply?.id ||
+    message.interactive?.list_reply?.id ||
+    null
+  )
+}
+
+function getInteractiveReplyTitle(message: WhatsAppMessage): string | null {
+  return (
+    message.interactive?.button_reply?.title ||
+    message.interactive?.list_reply?.title ||
+    null
+  )
+}
+
+function parseNameLocation(text: string): { name: string; location: string } {
+  const cleaned = text.trim()
+  let name = cleaned
+  let location = ''
+
+  const nameMatch = cleaned.match(/name\s*[:\-]\s*([^,\n]+)/i)
+  const locationMatch = cleaned.match(/location\s*[:\-]\s*([^,\n]+)/i)
+
+  if (nameMatch?.[1]) name = nameMatch[1].trim()
+  if (locationMatch?.[1]) location = locationMatch[1].trim()
+
+  if (!location) {
+    const parts = cleaned
+      .split(/,|\n/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+
+    if (parts.length >= 2) {
+      name = parts[0]
+      location = parts[1]
+    }
+  }
+
+  if (!name) name = 'Student'
+
+  return { name, location }
+}
+
+function getGreetingMessage() {
+  return `👋 Welcome to KB EDU Tech!
+
+We help students with university admissions, courses, fees, scholarships, hostel details, and admission guidance.
+
+Please share your details:
+
+Name:
+Location:`
+}
+
+function getUniversitySelectionMessage(name?: string) {
+  return `Thank you${name ? `, ${name}` : ''} 😊
+
+Please select the university you are interested in:
+
+1️⃣ Chettinad Academy of Research and Education
+2️⃣ Kalasalingam Academy of Research and Education
+
+Reply with 1 or 2.`
+}
+
+function getMenuMessage(university: UniversityKey) {
+  return `Great choice 😊
+
+What would you like to know about ${UNIVERSITY_LABELS[university]}?
+
+1️⃣ Courses
+2️⃣ Fees / Scholarships / Hostel
+3️⃣ Administration Office
+4️⃣ Others
+
+Reply with 1, 2, 3, or 4.`
+}
+
+function getStaticAnswer(university: UniversityKey, menu: 'courses' | 'fees' | 'office') {
+  if (university === 'kalasalingam') {
+    if (menu === 'courses') {
+      return `🎓 Kalasalingam Academy of Research and Education offers:
+
+B.Tech:
+• CSE: AI & ML, Cyber Security, Data Science / Big Data, IoT
+• AI & Data Science
+• CSE Work Integrated: Software Product Engineering
+• IT: Game Development, Blockchain Technology
+• ECE: AI, IoT, ASIC SOC, RTL, UVM
+• Mechanical: Mechatronics, Robotics, Digital Manufacturing
+• Biomedical: Medical Devices & Technology
+• Aeronautical, Biotechnology, Food Technology, Civil, EEE
+• B.Arch
+
+Other Programs:
+• B.Sc Agriculture, B.Sc Horticulture
+• B.Sc Forensic Science, B.Sc Nursing
+• M.Tech, M.Arch, MBA, MCA, M.Sc, Ph.D
+
+For admission support: 9676232325`
+    }
+
+    if (menu === 'fees') {
+      return `💰 Kalasalingam Tuition Fees:
+
+• B.Tech CSE / IT: ₹1,95,000 per year
+• B.Tech ECE / Bio-Technology: ₹1,60,000 per year
+• Aeronautical, Agriculture, Mechanical, Mechatronics, Civil, Chemical, EEE, Bio Medical, Food Technology, B.Arch: ₹1,00,000 per year
+
+🎓 Merit Scholarship for CSE/IT:
+• JEE Rank 1–50,000: 100% scholarship, pay ₹0
+• JEE Rank 50,001–1,00,000: pay ₹58,500
+• JEE Rank 1,00,001–2,00,000: pay ₹1,17,000
+• PCM above 90%: pay ₹1,56,000
+• PCM 80–89.99%: pay ₹1,75,500
+
+🏠 Hostel: ₹80,000 to ₹1,50,000 per year based on room type.
+
+For exact admission guidance: 9676232325`
+    }
+
+    return `📍 Kalasalingam Admission Information Office:
+
+Balaji Commercial Complex,
+Bhagya Nagar Colony,
+Kukatpally, Hyderabad
+
+📞 Phone: 9676232325
+
+Our counselor can guide you with admission process, courses, fees, scholarships, hostel, and campus details.`
+  }
+
+  if (menu === 'courses') {
+    return `🎓 Chettinad Academy of Research and Education offers:
+
+• Faculty of Medicine: MBBS, MD, MS, DM, MCh
+• Allied Health Sciences: BSc, MSc
+• Nursing: BSc Nursing, MSc Nursing, PB BSc Nursing
+• Architecture: B.Arch, M.Arch
+• Pharmacy: B.Pharm, M.Pharm, Pharm.D
+• Physiotherapy: BPT, MPT
+• Occupational Therapy: BOT
+• Law: BA LLB, BBA LLB, LLM
+
+Admissions 2026–2027 are open.
+
+For admission support: 9676232325`
+  }
+
+  if (menu === 'fees') {
+    return `💰 Chettinad fee details vary by program.
+
+Programs include Medicine, Allied Health Sciences, Nursing, Architecture, Pharmacy, Physiotherapy, Occupational Therapy, and Law.
+
+For exact latest fee details, eligibility, and admission process, please contact KB EDU Tech counselor:
+
+📞 9676232325
+
+Chettinad official admission portal:
+admission.care.edu.in`
+  }
+
+  return `📍 Chettinad Main Campus:
+
+Chettinad Health City,
+Rajiv Gandhi Salai OMR,
+Kelambakkam - 603103,
+Chengalpattu District,
+Chennai, Tamil Nadu
+
+📞 Chettinad Enquiry: +91 844 789 2022
+🌐 Website: www.care.edu.in
+📝 Apply: admission.care.edu.in
+
+KB EDU Tech Hyderabad admission support:
+📞 9676232325`
+}
+
+function getOthersPrompt() {
+  return `Sure 😊 Please type your specific question.
+
+Our AI assistant will help with admission, eligibility, scholarships, courses, fees, hostel, placements, or campus details.`
+}
+
+async function sendAndStoreAgentMessage(params: {
+  conversationId: string
+  phoneNumberId: string
+  accessToken: string
+  to: string
+  text: string
+}) {
+  const metaMessageId = await sendWhatsAppReply(
+    params.phoneNumberId,
+    params.accessToken,
+    params.to,
+    params.text
+  )
+
+  if (!metaMessageId) {
+    console.error('[Bot] WhatsApp send failed. No Meta message ID returned.')
+    return null
+  }
+
+  const { error } = await supabaseAdmin().from('messages').insert({
+    conversation_id: params.conversationId,
+    sender_type: 'agent',
+    content_type: 'text',
+    content_text: params.text,
+    message_id: metaMessageId,
+    status: 'sent',
+    created_at: new Date().toISOString(),
+  })
+
+  if (error) {
+    console.error('[Bot] Error inserting bot message:', error)
+  }
+
+  await supabaseAdmin()
+    .from('conversations')
+    .update({
+      last_message_text: params.text,
+      last_message_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', params.conversationId)
+
+  return metaMessageId
+}
+
+async function handleHybridBotFlow(params: {
+  message: WhatsAppMessage
+  conversationId: string
+  phoneNumberId: string
+  accessToken: string
+  senderPhone: string
+  inboundText: string
+  interactiveReplyId: string | null
+  interactiveReplyTitle: string | null
+}) {
+  const {
+    message,
+    conversationId,
+    phoneNumberId,
+    accessToken,
+    senderPhone,
+    inboundText,
+    interactiveReplyId,
+    interactiveReplyTitle,
+  } = params
+
+  const currentState = botStateMemory[senderPhone]
+  const rawChoice = normalizeChoice(interactiveReplyId || interactiveReplyTitle || inboundText)
+  const textChoice = normalizeChoice(inboundText)
+
+  const sendBotText = async (text: string) => {
+    return sendAndStoreAgentMessage({
+      conversationId,
+      phoneNumberId,
+      accessToken,
+      to: message.from,
+      text,
+    })
+  }
+
+  if (!currentState) {
+    botStateMemory[senderPhone] = {
+      stage: 'waiting_for_name_location',
+    }
+
+    await sendBotText(getGreetingMessage())
+    return
+  }
+
+  if (currentState.stage === 'waiting_for_name_location') {
+    const details = parseNameLocation(inboundText)
+
+    botStateMemory[senderPhone] = {
+      ...currentState,
+      stage: 'waiting_for_university',
+      name: details.name,
+      location: details.location,
+    }
+
+    await sendBotText(getUniversitySelectionMessage(details.name))
+    return
+  }
+
+  if (currentState.stage === 'waiting_for_university') {
+    const university =
+      UNIVERSITY_SELECTION_ALIASES[rawChoice] ||
+      UNIVERSITY_SELECTION_ALIASES[textChoice]
+
+    if (!university) {
+      await sendBotText(getUniversitySelectionMessage(currentState.name))
+      return
+    }
+
+    botStateMemory[senderPhone] = {
+      ...currentState,
+      stage: 'waiting_for_menu_choice',
+      selectedUniversity: university,
+    }
+
+    await sendBotText(getMenuMessage(university))
+    return
+  }
+
+  if (currentState.stage === 'waiting_for_menu_choice') {
+    const selectedUniversity = currentState.selectedUniversity
+
+    if (!selectedUniversity) {
+      botStateMemory[senderPhone] = {
+        ...currentState,
+        stage: 'waiting_for_university',
+      }
+
+      await sendBotText(getUniversitySelectionMessage(currentState.name))
+      return
+    }
+
+    const menuChoice =
+      MENU_ALIASES[rawChoice] ||
+      MENU_ALIASES[textChoice]
+
+    if (!menuChoice) {
+      await sendBotText(getMenuMessage(selectedUniversity))
+      return
+    }
+
+    if (menuChoice === 'others') {
+      botStateMemory[senderPhone] = {
+        ...currentState,
+        stage: 'waiting_for_custom_question',
+      }
+
+      await sendBotText(getOthersPrompt())
+      return
+    }
+
+    await sendBotText(getStaticAnswer(selectedUniversity, menuChoice))
+    await sendBotText(getMenuMessage(selectedUniversity))
+    return
+  }
+
+  if (currentState.stage === 'waiting_for_custom_question') {
+    const aiReply = await getAIReply(inboundText, senderPhone)
+
+    if (!aiReply) {
+      await sendBotText(
+        `Sorry, I could not process that right now. Please contact KB EDU Tech counselor at 9676232325.`
+      )
+    } else {
+      await sendBotText(aiReply)
+    }
+
+    botStateMemory[senderPhone] = {
+      ...currentState,
+      stage: 'waiting_for_menu_choice',
+    }
+
+    if (currentState.selectedUniversity) {
+      await sendBotText(getMenuMessage(currentState.selectedUniversity))
+    }
+
+    return
+  }
+}
+
 // GET - Webhook verification
 export async function GET(request: Request) {
   try {
@@ -131,7 +580,7 @@ export async function GET(request: Request) {
           break
         }
       } catch {
-        // Skip malformed / wrong-key token row
+        // skip malformed / wrong-key token row
       }
     }
 
@@ -188,10 +637,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
-  // Useful while debugging delivery issues
   console.log('[webhook] Meta webhook received:', JSON.stringify(body, null, 2))
 
-  // Process asynchronously so Meta gets 200 quickly
   processWebhook(body).catch((error) => {
     console.error('[webhook] Error processing webhook:', error)
   })
@@ -214,15 +661,12 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
 
       const value = change.value
 
-      // 1. Handle outgoing message delivery statuses:
-      // sent / delivered / read / failed
       if (value.statuses?.length) {
         for (const status of value.statuses) {
           await handleStatusUpdate(status)
         }
       }
 
-      // 2. If this webhook event is only a status update, stop here.
       if (!value.messages || !value.contacts) {
         continue
       }
@@ -280,8 +724,6 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
   }
 }
 
-// The happy-path status ladder — pending → sent → delivered → read → replied.
-// `failed` is terminal and should not override delivered/read/replied.
 const RECIPIENT_STATUS_LADDER = [
   'pending',
   'sent',
@@ -324,7 +766,6 @@ async function handleStatusUpdate(status: WhatsAppStatus) {
     })
   }
 
-  // Update normal messages table using real Meta wamid
   const { data: updatedMessages, error: msgErr } = await supabaseAdmin()
     .from('messages')
     .update({ status: status.status })
@@ -339,7 +780,6 @@ async function handleStatusUpdate(status: WhatsAppStatus) {
     console.log('[WhatsApp Status] Updated message rows:', updatedMessages)
   }
 
-  // Update broadcast recipient only if this wamid belongs to broadcast
   const timestampNumber = parseInt(status.timestamp, 10)
   const tsIso = Number.isFinite(timestampNumber)
     ? new Date(timestampNumber * 1000).toISOString()
@@ -356,9 +796,7 @@ async function handleStatusUpdate(status: WhatsAppStatus) {
     return
   }
 
-  if (!recipient) {
-    return
-  }
+  if (!recipient) return
 
   if (!isValidStatusTransition(recipient.status, status.status)) {
     console.warn('[WhatsApp Status] Ignored invalid broadcast status transition:', {
@@ -373,17 +811,9 @@ async function handleStatusUpdate(status: WhatsAppStatus) {
     status: status.status,
   }
 
-  if (status.status === 'sent') {
-    update.sent_at = tsIso
-  }
-
-  if (status.status === 'delivered') {
-    update.delivered_at = tsIso
-  }
-
-  if (status.status === 'read') {
-    update.read_at = tsIso
-  }
+  if (status.status === 'sent') update.sent_at = tsIso
+  if (status.status === 'delivered') update.delivered_at = tsIso
+  if (status.status === 'read') update.read_at = tsIso
 
   const { error: recUpdateErr } = await supabaseAdmin()
     .from('broadcast_recipients')
@@ -635,6 +1065,8 @@ async function processMessage(
   const flowConsumed = flowResult.consumed
 
   const inboundText = contentText ?? message.text?.body ?? ''
+  const interactiveRawId = getInteractiveReplyId(message)
+  const interactiveRawTitle = getInteractiveReplyTitle(message)
 
   const automationTriggers: (
     | 'new_contact_created'
@@ -667,78 +1099,18 @@ async function processMessage(
     }).catch((err) => console.error('[automations] dispatch failed:', err))
   }
 
-  // ── KBEduTech AI Agent ──────────────────────────────────────
-  // Important:
-  // 1. Generate AI reply.
-  // 2. Send WhatsApp reply.
-  // 3. Get real Meta wamid.
-  // 4. Save AI message using real wamid.
-  // This allows Meta statuses to update the same message row later.
-  if (
-    message.type === 'text' &&
-    !interactiveReplyId &&
-    contentText &&
-    process.env.OPENAI_API_KEY
-  ) {
-    ;(async () => {
-      try {
-        const aiReply = await getAIReply(contentText, senderPhone)
-
-        if (!aiReply) {
-          console.warn('[AI Agent] No AI reply generated')
-          return
-        }
-
-        const metaMessageId = await sendWhatsAppReply(
-          phoneNumberId,
-          accessToken,
-          message.from,
-          aiReply
-        )
-
-        if (!metaMessageId) {
-          console.error('[AI Agent] WhatsApp send failed. No Meta message ID returned.')
-          return
-        }
-
-        console.log('[AI Agent] Meta message id:', metaMessageId)
-
-        const { error: insertAiMsgError } = await supabaseAdmin()
-          .from('messages')
-          .insert({
-            conversation_id: conversation.id,
-            sender_type: 'agent',
-            content_type: 'text',
-            content_text: aiReply,
-            message_id: metaMessageId,
-            status: 'sent',
-            created_at: new Date().toISOString(),
-          })
-
-        if (insertAiMsgError) {
-          console.error('[AI Agent] Error inserting AI message:', insertAiMsgError)
-        }
-
-        const { error: convUpdateError } = await supabaseAdmin()
-          .from('conversations')
-          .update({
-            last_message_text: aiReply,
-            last_message_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', conversation.id)
-
-        if (convUpdateError) {
-          console.error('[AI Agent] Error updating conversation after AI reply:', convUpdateError)
-        }
-
-        console.log('[AI Agent] Replied to:', message.from)
-      } catch (err) {
-        console.error('[AI Agent] Error:', err)
-      }
-    })()
+  if (!flowConsumed && (message.type === 'text' || message.type === 'interactive')) {
+    handleHybridBotFlow({
+      message,
+      conversationId: conversation.id,
+      phoneNumberId,
+      accessToken,
+      senderPhone,
+      inboundText,
+      interactiveReplyId: interactiveRawId,
+      interactiveReplyTitle: interactiveRawTitle,
+    }).catch((err) => console.error('[Hybrid Bot] Error:', err))
   }
-  // ── End AI Agent ─────────────────────────────────────────────
 }
 
 async function parseMessageContent(
@@ -774,10 +1146,7 @@ async function parseMessageContent(
 
   switch (message.type) {
     case 'text':
-      return {
-        ...empty,
-        contentText: message.text?.body || null,
-      }
+      return { ...empty, contentText: message.text?.body || null }
 
     case 'image':
       if (message.image?.id) {
@@ -844,18 +1213,12 @@ async function parseMessageContent(
           .filter(Boolean)
           .join(' - ')
 
-        return {
-          ...empty,
-          contentText: locationText,
-        }
+        return { ...empty, contentText: locationText }
       }
       return empty
 
     case 'reaction':
-      return {
-        ...empty,
-        contentText: message.reaction?.emoji || null,
-      }
+      return { ...empty, contentText: message.reaction?.emoji || null }
 
     case 'interactive': {
       const reply =
@@ -869,10 +1232,7 @@ async function parseMessageContent(
         }
       }
 
-      return {
-        ...empty,
-        contentText: '[Interactive reply]',
-      }
+      return { ...empty, contentText: '[Interactive reply]' }
     }
 
     default:
@@ -907,17 +1267,11 @@ async function findOrCreateContact(
     if (name && name !== existingContact.name) {
       await supabaseAdmin()
         .from('contacts')
-        .update({
-          name,
-          updated_at: new Date().toISOString(),
-        })
+        .update({ name, updated_at: new Date().toISOString() })
         .eq('id', existingContact.id)
     }
 
-    return {
-      contact: existingContact,
-      wasCreated: false,
-    }
+    return { contact: existingContact, wasCreated: false }
   }
 
   const { data: newContact, error: createError } = await supabaseAdmin()
@@ -939,22 +1293,14 @@ async function findOrCreateContact(
         phone
       )
 
-      if (raced) {
-        return {
-          contact: raced,
-          wasCreated: false,
-        }
-      }
+      if (raced) return { contact: raced, wasCreated: false }
     }
 
     console.error('[webhook] Error creating contact:', createError)
     return null
   }
 
-  return {
-    contact: newContact,
-    wasCreated: true,
-  }
+  return { contact: newContact, wasCreated: true }
 }
 
 async function findOrCreateConversation(
