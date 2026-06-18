@@ -1,7 +1,7 @@
 import { sendTextMessage } from '@/lib/whatsapp/meta-api'
+
 // ── KBEduTech AI Agent ─────────────────────────────────────────
-// Drop this file in: src/lib/ai-agent.ts
-// Then call handleAIAgent() from the webhook route after saving the message
+// File path: src/lib/ai-agent.ts
 
 const SYSTEM_PROMPT = `You are an AI admission assistant for KBEduTech, a student university admissions consultancy based in Hyderabad, India. You help students find the right university based on their interests and budget.
 
@@ -93,7 +93,7 @@ Phone: +91 63011 74386
 YOUR INSTRUCTIONS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - Be friendly, warm, and concise
-- Reply in the same language the student uses (Hindi or English)
+- Reply in the same language the student uses, Hindi or English
 - Always greet new students warmly by name if available
 - Ask about their stream/interest to recommend the right university
 - Give exact fee figures from the knowledge base when asked
@@ -102,83 +102,94 @@ YOUR INSTRUCTIONS:
 - Never make up information not in this knowledge base
 - Keep replies under 250 words
 - Use emojis to make responses friendly
-- End with a helpful follow-up question when appropriate`;
+- End with a helpful follow-up question when appropriate`
 
-// In-memory conversation history (resets on server restart)
-const conversationHistory: Record<string, Array<{ role: string; content: string }>> = {};
+// In-memory conversation history. This resets when server restarts.
+const conversationHistory: Record<string, Array<{ role: 'user' | 'assistant'; content: string }>> = {}
 
 export async function getAIReply(
   userMessage: string,
   phoneNumber: string
 ): Promise<string | null> {
   try {
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY
+
     if (!apiKey) {
-      console.log("No OPENAI_API_KEY set — AI agent disabled");
-      return null;
+      console.log('[AI Agent] No OPENAI_API_KEY set — AI agent disabled')
+      return null
     }
 
-    // Initialize conversation history for this contact
     if (!conversationHistory[phoneNumber]) {
-      conversationHistory[phoneNumber] = [];
+      conversationHistory[phoneNumber] = []
     }
 
-    // Add user message
     conversationHistory[phoneNumber].push({
-      role: "user",
+      role: 'user',
       content: userMessage,
-    });
+    })
 
     // Keep last 10 messages only
     if (conversationHistory[phoneNumber].length > 10) {
-      conversationHistory[phoneNumber] = conversationHistory[phoneNumber].slice(-10);
+      conversationHistory[phoneNumber] = conversationHistory[phoneNumber].slice(-10)
     }
 
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
+        'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: 'gpt-4o-mini',
         max_tokens: 400,
         temperature: 0.7,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
+          { role: 'system', content: SYSTEM_PROMPT },
           ...conversationHistory[phoneNumber],
         ],
       }),
-    });
+    })
 
-    const data = await response.json();
+    const data = await response.json()
 
     if (!response.ok) {
-      console.error("OpenAI API error:", data);
-      return null;
+      console.error('[AI Agent] OpenAI API error:', data)
+      return null
     }
 
-    const reply = data.choices?.[0]?.message?.content;
-    if (!reply) return null;
+    const reply = data.choices?.[0]?.message?.content
 
-    // Save AI reply to history
+    if (!reply) {
+      console.warn('[AI Agent] Empty OpenAI reply')
+      return null
+    }
+
     conversationHistory[phoneNumber].push({
-      role: "assistant",
+      role: 'assistant',
       content: reply,
-    });
+    })
 
-    return reply;
+    return reply
   } catch (error) {
-    console.error("AI Agent error:", error);
-    return null;
+    console.error('[AI Agent] Error generating reply:', error)
+    return null
   }
 }
+
+/**
+ * Sends WhatsApp reply through Meta Cloud API.
+ *
+ * IMPORTANT:
+ * This returns the real Meta message ID / wamid.
+ * That wamid must be saved in Supabase messages.message_id
+ * so the webhook statuses can later update sent/delivered/read/failed.
+ */
 export async function sendWhatsAppReply(
   phoneNumberId: string,
   accessToken: string,
   to: string,
   message: string
-): Promise<boolean> {
+): Promise<string | null> {
   try {
     const result = await sendTextMessage({
       phoneNumberId,
@@ -186,10 +197,17 @@ export async function sendWhatsAppReply(
       to,
       text: message,
     })
-    console.log("AI reply sent successfully:", result.messageId)
-    return true
+
+    if (!result?.messageId) {
+      console.error('[AI Agent] WhatsApp send succeeded but no messageId returned:', result)
+      return null
+    }
+
+    console.log('[AI Agent] WhatsApp reply sent successfully. Meta message ID:', result.messageId)
+
+    return result.messageId
   } catch (error) {
-    console.error("Send WhatsApp reply FULL ERROR:", JSON.stringify(error), String(error))
-    return false
+    console.error('[AI Agent] Send WhatsApp reply FULL ERROR:', error)
+    return null
   }
 }
