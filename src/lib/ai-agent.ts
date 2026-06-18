@@ -189,7 +189,7 @@ export async function sendWhatsAppReply(
     console.log("AI reply sent successfully:", result.messageId)
     return true
   } catch (error) {
-    console.error("Send WhatsApp reply error:", error)
+    console.error("Send WhatsApp reply FULL ERROR:", JSON.stringify(error), String(error))
     return false
   }
 }
