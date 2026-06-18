@@ -14,11 +14,12 @@ import {
 } from '@/lib/whatsapp/template-webhook'
 
 // File path: src/app/api/whatsapp/webhook/route.ts
-// Hybrid bot logic:
-// Static replies for greeting, name/location, university, courses, fees, office.
-// OpenAI is called only after the user chooses "Others" and sends a custom question.
+// V2 Hybrid bot:
+// - Understands natural phrases like "Kalasalingam fees", "scholarship", "hostel", "Chettinad courses".
+// - Switches university context when user mentions another university.
+// - Does not repeat the menu unnecessarily after every answer.
+// - Calls OpenAI only for true custom questions.
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _adminClient: any = null
 
 function supabaseAdmin() {
@@ -28,7 +29,6 @@ function supabaseAdmin() {
       process.env.SUPABASE_SERVICE_ROLE_KEY!
     )
   }
-
   return _adminClient
 }
 
@@ -39,6 +39,7 @@ type BotStage =
   | 'waiting_for_custom_question'
 
 type UniversityKey = 'chettinad' | 'kalasalingam'
+type MenuKey = 'courses' | 'fees' | 'office' | 'others' | 'placements' | 'facilities'
 
 interface WhatsAppMessage {
   id: string
@@ -48,20 +49,10 @@ interface WhatsAppMessage {
   text?: { body: string }
   image?: { id: string; mime_type: string; caption?: string }
   video?: { id: string; mime_type: string; caption?: string }
-  document?: {
-    id: string
-    mime_type: string
-    filename?: string
-    caption?: string
-  }
+  document?: { id: string; mime_type: string; filename?: string; caption?: string }
   audio?: { id: string; mime_type: string }
   sticker?: { id: string; mime_type: string }
-  location?: {
-    latitude: number
-    longitude: number
-    name?: string
-    address?: string
-  }
+  location?: { latitude: number; longitude: number; name?: string; address?: string }
   reaction?: { message_id: string; emoji: string }
   interactive?: {
     type: 'button_reply' | 'list_reply'
@@ -89,14 +80,8 @@ interface WhatsAppWebhookEntry {
   changes: Array<{
     value: {
       messaging_product: string
-      metadata: {
-        display_phone_number: string
-        phone_number_id: string
-      }
-      contacts?: Array<{
-        profile: { name: string }
-        wa_id: string
-      }>
+      metadata: { display_phone_number: string; phone_number_id: string }
+      contacts?: Array<{ profile: { name: string }; wa_id: string }>
       messages?: WhatsAppMessage[]
       statuses?: WhatsAppStatus[]
     }
@@ -111,8 +96,6 @@ interface BotState {
   location?: string
 }
 
-// NOTE: In-memory state resets when server restarts.
-// For production, move this state to Supabase columns/table.
 const botStateMemory: Record<string, BotState> = {}
 
 const UNIVERSITY_LABELS: Record<UniversityKey, string> = {
@@ -120,69 +103,55 @@ const UNIVERSITY_LABELS: Record<UniversityKey, string> = {
   kalasalingam: 'Kalasalingam Academy of Research and Education',
 }
 
-const UNIVERSITY_SELECTION_ALIASES: Record<string, UniversityKey> = {
-  '1': 'chettinad',
-  chettinad: 'chettinad',
-  'chettinad university': 'chettinad',
-  care: 'chettinad',
-  'chettinad academy of research and education': 'chettinad',
-  button_chettinad: 'chettinad',
-
-  '2': 'kalasalingam',
-  kalasalingam: 'kalasalingam',
-  'kalasalingam university': 'kalasalingam',
-  kare: 'kalasalingam',
-  'kalasalingam academy of research and education': 'kalasalingam',
-  button_kalasalingam: 'kalasalingam',
-}
-
-const MENU_ALIASES: Record<string, 'courses' | 'fees' | 'office' | 'others'> = {
-  '1': 'courses',
-  courses: 'courses',
-  course: 'courses',
-  programmes: 'courses',
-  programs: 'courses',
-  button_courses: 'courses',
-
-  '2': 'fees',
-  fees: 'fees',
-  fee: 'fees',
-  scholarship: 'fees',
-  scholarships: 'fees',
-  hostel: 'fees',
-  button_fees: 'fees',
-
-  '3': 'office',
-  'administration office': 'office',
-  office: 'office',
-  location: 'office',
-  address: 'office',
-  contact: 'office',
-  button_office: 'office',
-
-  '4': 'others',
-  others: 'others',
-  other: 'others',
-  custom: 'others',
-  question: 'others',
-  button_others: 'others',
-}
-
-function normalizeChoice(input: string | null | undefined): string {
+function cleanText(input: string | null | undefined): string {
   return (input || '').trim().toLowerCase()
 }
 
-function getInteractiveReplyId(message: WhatsAppMessage): string | null {
-  return (
-    message.interactive?.button_reply?.id ||
-    message.interactive?.list_reply?.id ||
-    null
-  )
+function detectUniversity(text: string): UniversityKey | null {
+  const t = cleanText(text)
+  if (/\b(1|chettinad|care)\b/.test(t)) return 'chettinad'
+  if (/\b(2|kalasalingam|kare)\b/.test(t)) return 'kalasalingam'
+  return null
 }
 
-function getInteractiveReplyTitle(message: WhatsAppMessage): string | null {
+function detectMenu(text: string): MenuKey | null {
+  const t = cleanText(text)
+
+  if (/^(1)$/.test(t) || /\b(course|courses|program|programs|programme|programmes|branch|branches)\b/.test(t)) {
+    return 'courses'
+  }
+
+  if (
+    /^(2)$/.test(t) ||
+    /\b(fee|fees|tuition|scholarship|scholarships|hostel|hostel fee|hostel fees|cost|amount)\b/.test(t)
+  ) {
+    return 'fees'
+  }
+
+  if (/^(3)$/.test(t) || /\b(office|address|location|contact|phone|administration)\b/.test(t)) {
+    return 'office'
+  }
+
+  if (/\b(placement|placements|package|salary|companies|offers)\b/.test(t)) {
+    return 'placements'
+  }
+
+  if (/\b(facilities|campus|sports|clubs|library|labs|hostels)\b/.test(t)) {
+    return 'facilities'
+  }
+
+  if (/^(4)$/.test(t) || /\b(other|others|custom|question|help)\b/.test(t)) {
+    return 'others'
+  }
+
+  return null
+}
+
+function getInteractiveText(message: WhatsAppMessage): string | null {
   return (
+    message.interactive?.button_reply?.id ||
     message.interactive?.button_reply?.title ||
+    message.interactive?.list_reply?.id ||
     message.interactive?.list_reply?.title ||
     null
   )
@@ -200,11 +169,7 @@ function parseNameLocation(text: string): { name: string; location: string } {
   if (locationMatch?.[1]) location = locationMatch[1].trim()
 
   if (!location) {
-    const parts = cleaned
-      .split(/,|\n/)
-      .map((p) => p.trim())
-      .filter(Boolean)
-
+    const parts = cleaned.split(/,|\n/).map((p) => p.trim()).filter(Boolean)
     if (parts.length >= 2) {
       name = parts[0]
       location = parts[1]
@@ -212,14 +177,13 @@ function parseNameLocation(text: string): { name: string; location: string } {
   }
 
   if (!name) name = 'Student'
-
   return { name, location }
 }
 
 function getGreetingMessage() {
   return `👋 Welcome to KB EDU Tech!
 
-We help students with university admissions, courses, fees, scholarships, hostel details, and admission guidance.
+We help students with admissions, courses, fees, scholarships, hostel details, and university guidance.
 
 Please share your details:
 
@@ -230,7 +194,7 @@ Location:`
 function getUniversitySelectionMessage(name?: string) {
   return `Thank you${name ? `, ${name}` : ''} 😊
 
-Please select the university you are interested in:
+Please select a university:
 
 1️⃣ Chettinad Academy of Research and Education
 2️⃣ Kalasalingam Academy of Research and Education
@@ -239,59 +203,92 @@ Reply with 1 or 2.`
 }
 
 function getMenuMessage(university: UniversityKey) {
-  return `Great choice 😊
-
-What would you like to know about ${UNIVERSITY_LABELS[university]}?
+  return `What would you like to know about ${UNIVERSITY_LABELS[university]}?
 
 1️⃣ Courses
 2️⃣ Fees / Scholarships / Hostel
-3️⃣ Administration Office
-4️⃣ Others
+3️⃣ Office / Contact
+4️⃣ Ask a custom question
 
-Reply with 1, 2, 3, or 4.`
+You can also type directly, like:
+"Kalasalingam fees" or "Chettinad courses".`
 }
 
-function getStaticAnswer(university: UniversityKey, menu: 'courses' | 'fees' | 'office') {
+function getShortMenuHint(university: UniversityKey) {
+  return `Need anything else about ${UNIVERSITY_LABELS[university]}?
+
+Reply:
+1 Courses | 2 Fees/Scholarship/Hostel | 3 Office | 4 Custom question`
+}
+
+function getStaticAnswer(university: UniversityKey, menu: Exclude<MenuKey, 'others'>) {
   if (university === 'kalasalingam') {
     if (menu === 'courses') {
-      return `🎓 Kalasalingam Academy of Research and Education offers:
+      return `🎓 Kalasalingam offers:
 
 B.Tech:
 • CSE: AI & ML, Cyber Security, Data Science / Big Data, IoT
 • AI & Data Science
 • CSE Work Integrated: Software Product Engineering
 • IT: Game Development, Blockchain Technology
-• ECE: AI, IoT, ASIC SOC, RTL, UVM
-• Mechanical: Mechatronics, Robotics, Digital Manufacturing
-• Biomedical: Medical Devices & Technology
+• ECE, Mechanical, Biomedical
 • Aeronautical, Biotechnology, Food Technology, Civil, EEE
 • B.Arch
 
-Other Programs:
-• B.Sc Agriculture, B.Sc Horticulture
-• B.Sc Forensic Science, B.Sc Nursing
+Other:
+• B.Sc Agriculture, Horticulture, Forensic Science, Nursing
 • M.Tech, M.Arch, MBA, MCA, M.Sc, Ph.D
 
-For admission support: 9676232325`
+Admission help: 9676232325`
     }
 
     if (menu === 'fees') {
-      return `💰 Kalasalingam Tuition Fees:
+      return `💰 Kalasalingam Fees & Scholarships:
 
-• B.Tech CSE / IT: ₹1,95,000 per year
-• B.Tech ECE / Bio-Technology: ₹1,60,000 per year
-• Aeronautical, Agriculture, Mechanical, Mechatronics, Civil, Chemical, EEE, Bio Medical, Food Technology, B.Arch: ₹1,00,000 per year
+Tuition:
+• CSE / IT: ₹1,95,000 per year
+• ECE / Bio-Technology: ₹1,60,000 per year
+• Aeronautical, Agriculture, Mechanical, Mechatronics, Civil, Chemical, EEE, Bio Medical, Food Tech, B.Arch: ₹1,00,000 per year
 
-🎓 Merit Scholarship for CSE/IT:
-• JEE Rank 1–50,000: 100% scholarship, pay ₹0
-• JEE Rank 50,001–1,00,000: pay ₹58,500
-• JEE Rank 1,00,001–2,00,000: pay ₹1,17,000
+Scholarship for CSE/IT:
+• JEE 1–50,000: 100% scholarship, pay ₹0
+• JEE 50,001–1,00,000: pay ₹58,500
+• JEE 1,00,001–2,00,000: pay ₹1,17,000
 • PCM above 90%: pay ₹1,56,000
 • PCM 80–89.99%: pay ₹1,75,500
 
-🏠 Hostel: ₹80,000 to ₹1,50,000 per year based on room type.
+Hostel: ₹80,000 to ₹1,50,000 per year.
 
-For exact admission guidance: 9676232325`
+Counselor: 9676232325`
+    }
+
+    if (menu === 'placements') {
+      return `📈 Kalasalingam Placements:
+
+• Highest package: 58 LPA
+• Average package: 6 LPA
+• Minimum package: 4.25 LPA
+• 350+ companies
+• 2800+ placement offers
+• 2100+ internship offers
+
+Top partners include Amazon, Google, Cisco, TCS, Infosys, Wipro, Accenture, Capgemini, Deloitte, Cognizant, HCL, PwC, Hyundai and more.`
+    }
+
+    if (menu === 'facilities') {
+      return `🏫 Kalasalingam Campus Facilities:
+
+• 550-acre eco-friendly green campus
+• Centralized A/C E-Library
+• 145 research labs
+• 24x7 medical college & hospital on campus
+• Olympic standard swimming pool
+• Indoor stadium, gym & yoga center
+• 14+ sports grounds
+• NCC, NSS, Rajasthan Royals partner
+• 30+ student clubs
+
+Admission help: 9676232325`
     }
 
     return `📍 Kalasalingam Admission Information Office:
@@ -300,15 +297,13 @@ Balaji Commercial Complex,
 Bhagya Nagar Colony,
 Kukatpally, Hyderabad
 
-📞 Phone: 9676232325
-
-Our counselor can guide you with admission process, courses, fees, scholarships, hostel, and campus details.`
+📞 Phone: 9676232325`
   }
 
   if (menu === 'courses') {
-    return `🎓 Chettinad Academy of Research and Education offers:
+    return `🎓 Chettinad offers:
 
-• Faculty of Medicine: MBBS, MD, MS, DM, MCh
+• Medicine: MBBS, MD, MS, DM, MCh
 • Allied Health Sciences: BSc, MSc
 • Nursing: BSc Nursing, MSc Nursing, PB BSc Nursing
 • Architecture: B.Arch, M.Arch
@@ -319,20 +314,40 @@ Our counselor can guide you with admission process, courses, fees, scholarships,
 
 Admissions 2026–2027 are open.
 
-For admission support: 9676232325`
+Admission help: 9676232325`
   }
 
   if (menu === 'fees') {
     return `💰 Chettinad fee details vary by program.
 
-Programs include Medicine, Allied Health Sciences, Nursing, Architecture, Pharmacy, Physiotherapy, Occupational Therapy, and Law.
+Available streams include Medicine, Allied Health Sciences, Nursing, Architecture, Pharmacy, Physiotherapy, Occupational Therapy, and Law.
 
-For exact latest fee details, eligibility, and admission process, please contact KB EDU Tech counselor:
+For exact latest fees, eligibility, and admission process, please contact KB EDU Tech counselor:
 
 📞 9676232325
 
-Chettinad official admission portal:
-admission.care.edu.in`
+Apply online: admission.care.edu.in`
+  }
+
+  if (menu === 'placements') {
+    return `📌 Chettinad is known for medical education, research, and multi-disciplinary academic programs.
+
+The attached knowledge document does not include exact placement package figures for Chettinad.
+
+For course-wise career guidance, please contact KB EDU Tech counselor:
+📞 9676232325`
+  }
+
+  if (menu === 'facilities') {
+    return `🏫 Chettinad Campus:
+
+• 33.5-acre green campus
+• Located at Kelambakkam, OMR, Chennai
+• Known for world-class medical education and research
+• Main campus plus Manamai, KGF, Karur, and Kanadukathan campuses
+
+Website: www.care.edu.in
+Apply: admission.care.edu.in`
   }
 
   return `📍 Chettinad Main Campus:
@@ -344,17 +359,14 @@ Chengalpattu District,
 Chennai, Tamil Nadu
 
 📞 Chettinad Enquiry: +91 844 789 2022
-🌐 Website: www.care.edu.in
-📝 Apply: admission.care.edu.in
+🌐 www.care.edu.in
 
-KB EDU Tech Hyderabad admission support:
+KB EDU Tech Hyderabad support:
 📞 9676232325`
 }
 
-function getOthersPrompt() {
-  return `Sure 😊 Please type your specific question.
-
-Our AI assistant will help with admission, eligibility, scholarships, courses, fees, hostel, placements, or campus details.`
+function getOthersPrompt(university?: UniversityKey) {
+  return `Sure 😊 Please type your specific question${university ? ` about ${UNIVERSITY_LABELS[university]}` : ''}.`
 }
 
 async function sendAndStoreAgentMessage(params: {
@@ -386,9 +398,7 @@ async function sendAndStoreAgentMessage(params: {
     created_at: new Date().toISOString(),
   })
 
-  if (error) {
-    console.error('[Bot] Error inserting bot message:', error)
-  }
+  if (error) console.error('[Bot] Error inserting bot message:', error)
 
   await supabaseAdmin()
     .from('conversations')
@@ -409,8 +419,7 @@ async function handleHybridBotFlow(params: {
   accessToken: string
   senderPhone: string
   inboundText: string
-  interactiveReplyId: string | null
-  interactiveReplyTitle: string | null
+  interactiveText: string | null
 }) {
   const {
     message,
@@ -419,13 +428,8 @@ async function handleHybridBotFlow(params: {
     accessToken,
     senderPhone,
     inboundText,
-    interactiveReplyId,
-    interactiveReplyTitle,
+    interactiveText,
   } = params
-
-  const currentState = botStateMemory[senderPhone]
-  const rawChoice = normalizeChoice(interactiveReplyId || interactiveReplyTitle || inboundText)
-  const textChoice = normalizeChoice(inboundText)
 
   const sendBotText = async (text: string) => {
     return sendAndStoreAgentMessage({
@@ -437,11 +441,38 @@ async function handleHybridBotFlow(params: {
     })
   }
 
-  if (!currentState) {
+  const currentState = botStateMemory[senderPhone]
+  const userText = interactiveText || inboundText
+  const mentionedUniversity = detectUniversity(userText)
+  const requestedMenu = detectMenu(userText)
+
+  // Direct shortcut: user types "Kalasalingam fees", "Chettinad courses", etc.
+  if (mentionedUniversity && requestedMenu && requestedMenu !== 'others') {
     botStateMemory[senderPhone] = {
-      stage: 'waiting_for_name_location',
+      ...(currentState || { stage: 'waiting_for_menu_choice' as BotStage }),
+      stage: 'waiting_for_menu_choice',
+      selectedUniversity: mentionedUniversity,
     }
 
+    await sendBotText(getStaticAnswer(mentionedUniversity, requestedMenu))
+    await sendBotText(getShortMenuHint(mentionedUniversity))
+    return
+  }
+
+  // Existing selected university + direct menu keyword: "scholarship", "hostel", "courses"
+  if (currentState?.selectedUniversity && requestedMenu && requestedMenu !== 'others') {
+    botStateMemory[senderPhone] = {
+      ...currentState,
+      stage: 'waiting_for_menu_choice',
+    }
+
+    await sendBotText(getStaticAnswer(currentState.selectedUniversity, requestedMenu))
+    await sendBotText(getShortMenuHint(currentState.selectedUniversity))
+    return
+  }
+
+  if (!currentState) {
+    botStateMemory[senderPhone] = { stage: 'waiting_for_name_location' }
     await sendBotText(getGreetingMessage())
     return
   }
@@ -461,9 +492,7 @@ async function handleHybridBotFlow(params: {
   }
 
   if (currentState.stage === 'waiting_for_university') {
-    const university =
-      UNIVERSITY_SELECTION_ALIASES[rawChoice] ||
-      UNIVERSITY_SELECTION_ALIASES[textChoice]
+    const university = mentionedUniversity
 
     if (!university) {
       await sendBotText(getUniversitySelectionMessage(currentState.name))
@@ -476,54 +505,72 @@ async function handleHybridBotFlow(params: {
       selectedUniversity: university,
     }
 
-    await sendBotText(getMenuMessage(university))
+    await sendBotText(`Great choice 😊 ${getMenuMessage(university)}`)
     return
   }
 
   if (currentState.stage === 'waiting_for_menu_choice') {
-    const selectedUniversity = currentState.selectedUniversity
+    const selectedUniversity = mentionedUniversity || currentState.selectedUniversity
 
     if (!selectedUniversity) {
-      botStateMemory[senderPhone] = {
-        ...currentState,
-        stage: 'waiting_for_university',
-      }
-
+      botStateMemory[senderPhone] = { ...currentState, stage: 'waiting_for_university' }
       await sendBotText(getUniversitySelectionMessage(currentState.name))
       return
     }
 
-    const menuChoice =
-      MENU_ALIASES[rawChoice] ||
-      MENU_ALIASES[textChoice]
+    if (mentionedUniversity && mentionedUniversity !== currentState.selectedUniversity) {
+      botStateMemory[senderPhone] = {
+        ...currentState,
+        selectedUniversity: mentionedUniversity,
+        stage: 'waiting_for_menu_choice',
+      }
+    }
 
-    if (!menuChoice) {
-      await sendBotText(getMenuMessage(selectedUniversity))
+    if (!requestedMenu) {
+      await sendBotText(getShortMenuHint(selectedUniversity))
       return
     }
 
-    if (menuChoice === 'others') {
+    if (requestedMenu === 'others') {
       botStateMemory[senderPhone] = {
         ...currentState,
+        selectedUniversity,
         stage: 'waiting_for_custom_question',
       }
 
-      await sendBotText(getOthersPrompt())
+      await sendBotText(getOthersPrompt(selectedUniversity))
       return
     }
 
-    await sendBotText(getStaticAnswer(selectedUniversity, menuChoice))
-    await sendBotText(getMenuMessage(selectedUniversity))
+    await sendBotText(getStaticAnswer(selectedUniversity, requestedMenu))
+    await sendBotText(getShortMenuHint(selectedUniversity))
     return
   }
 
   if (currentState.stage === 'waiting_for_custom_question') {
-    const aiReply = await getAIReply(inboundText, senderPhone)
+    // Before using OpenAI, still catch simple keywords to reduce cost.
+    const universityForQuestion = mentionedUniversity || currentState.selectedUniversity
+
+    if (universityForQuestion && requestedMenu && requestedMenu !== 'others') {
+      botStateMemory[senderPhone] = {
+        ...currentState,
+        selectedUniversity: universityForQuestion,
+        stage: 'waiting_for_menu_choice',
+      }
+
+      await sendBotText(getStaticAnswer(universityForQuestion, requestedMenu))
+      await sendBotText(getShortMenuHint(universityForQuestion))
+      return
+    }
+
+    const aiReply = await getAIReply(inboundText, senderPhone, {
+      selectedUniversity: universityForQuestion ? UNIVERSITY_LABELS[universityForQuestion] : undefined,
+      name: currentState.name,
+      location: currentState.location,
+    })
 
     if (!aiReply) {
-      await sendBotText(
-        `Sorry, I could not process that right now. Please contact KB EDU Tech counselor at 9676232325.`
-      )
+      await sendBotText(`Sorry, I could not process that right now. Please contact KB EDU Tech counselor at 9676232325.`)
     } else {
       await sendBotText(aiReply)
     }
@@ -531,10 +578,13 @@ async function handleHybridBotFlow(params: {
     botStateMemory[senderPhone] = {
       ...currentState,
       stage: 'waiting_for_menu_choice',
+      selectedUniversity: universityForQuestion || currentState.selectedUniversity,
     }
 
-    if (currentState.selectedUniversity) {
-      await sendBotText(getMenuMessage(currentState.selectedUniversity))
+    if (universityForQuestion) {
+      await sendBotText(getShortMenuHint(universityForQuestion))
+    } else {
+      await sendBotText(getUniversitySelectionMessage(currentState.name))
     }
 
     return
@@ -550,10 +600,7 @@ export async function GET(request: Request) {
     const verifyToken = searchParams.get('hub.verify_token')
 
     if (mode !== 'subscribe' || !challenge || !verifyToken) {
-      return NextResponse.json(
-        { error: 'Missing verification parameters' },
-        { status: 400 }
-      )
+      return NextResponse.json({ error: 'Missing verification parameters' }, { status: 400 })
     }
 
     const { data: configs, error: configError } = await supabaseAdmin()
@@ -562,26 +609,19 @@ export async function GET(request: Request) {
 
     if (configError || !configs) {
       console.error('[webhook] Error fetching configs for verification:', configError)
-      return NextResponse.json(
-        { error: 'Verification failed' },
-        { status: 403 }
-      )
+      return NextResponse.json({ error: 'Verification failed' }, { status: 403 })
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let matchedConfig: any = null
 
     for (const config of configs) {
       if (!config.verify_token) continue
-
       try {
         if (decrypt(config.verify_token) === verifyToken) {
           matchedConfig = config
           break
         }
-      } catch {
-        // skip malformed / wrong-key token row
-      }
+      } catch {}
     }
 
     if (matchedConfig) {
@@ -592,30 +632,18 @@ export async function GET(request: Request) {
           .eq('id', matchedConfig.id)
           .then(({ error }: { error: unknown }) => {
             if (error) {
-              console.warn(
-                '[webhook] verify_token GCM upgrade failed:',
-                (error as { message?: string })?.message ?? error
-              )
+              console.warn('[webhook] verify_token GCM upgrade failed:', (error as { message?: string })?.message ?? error)
             }
           })
       }
 
-      return new Response(challenge, {
-        status: 200,
-        headers: { 'Content-Type': 'text/plain' },
-      })
+      return new Response(challenge, { status: 200, headers: { 'Content-Type': 'text/plain' } })
     }
 
-    return NextResponse.json(
-      { error: 'Verification token mismatch' },
-      { status: 403 }
-    )
+    return NextResponse.json({ error: 'Verification token mismatch' }, { status: 403 })
   } catch (error) {
     console.error('[webhook] Error in GET verification:', error)
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    )
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
 
@@ -639,9 +667,7 @@ export async function POST(request: Request) {
 
   console.log('[webhook] Meta webhook received:', JSON.stringify(body, null, 2))
 
-  processWebhook(body).catch((error) => {
-    console.error('[webhook] Error processing webhook:', error)
-  })
+  processWebhook(body).catch((error) => console.error('[webhook] Error processing webhook:', error))
 
   return NextResponse.json({ status: 'received' }, { status: 200 })
 }
@@ -652,24 +678,17 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
   for (const entry of body.entry) {
     for (const change of entry.changes) {
       if (isTemplateWebhookField(change.field)) {
-        await handleTemplateWebhookChange(
-          { field: change.field, value: change.value as unknown },
-          supabaseAdmin()
-        )
+        await handleTemplateWebhookChange({ field: change.field, value: change.value as unknown }, supabaseAdmin())
         continue
       }
 
       const value = change.value
 
       if (value.statuses?.length) {
-        for (const status of value.statuses) {
-          await handleStatusUpdate(status)
-        }
+        for (const status of value.statuses) await handleStatusUpdate(status)
       }
 
-      if (!value.messages || !value.contacts) {
-        continue
-      }
+      if (!value.messages || !value.contacts) continue
 
       const phoneNumberId = value.metadata.phone_number_id
 
@@ -679,11 +698,7 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
         .eq('phone_number_id', phoneNumberId)
 
       if (configError) {
-        console.error(
-          '[webhook] Error fetching whatsapp_config for phone_number_id:',
-          phoneNumberId,
-          configError
-        )
+        console.error('[webhook] Error fetching whatsapp_config for phone_number_id:', phoneNumberId, configError)
         continue
       }
 
@@ -693,14 +708,7 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
       }
 
       if (configRows.length > 1) {
-        console.error(
-          `[webhook] Multiple configs (${configRows.length}) found for phone_number_id:`,
-          phoneNumberId,
-          'Inbound message dropped. Resolve duplicates.',
-          configRows.map((r: { account_id: string; user_id: string }) => {
-            return `${r.account_id} (admin ${r.user_id})`
-          })
-        )
+        console.error(`[webhook] Multiple configs (${configRows.length}) found for phone_number_id:`, phoneNumberId)
         continue
       }
 
@@ -724,13 +732,7 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
   }
 }
 
-const RECIPIENT_STATUS_LADDER = [
-  'pending',
-  'sent',
-  'delivered',
-  'read',
-  'replied',
-] as const
+const RECIPIENT_STATUS_LADDER = ['pending', 'sent', 'delivered', 'read', 'replied'] as const
 
 function ladderLevel(s: string): number {
   const idx = (RECIPIENT_STATUS_LADDER as readonly string[]).indexOf(s)
@@ -738,20 +740,12 @@ function ladderLevel(s: string): number {
 }
 
 function isValidStatusTransition(current: string, incoming: string): boolean {
-  if (incoming === 'failed') {
-    return current === 'pending' || current === 'sent'
-  }
-
-  if (current === 'failed') {
-    return false
-  }
-
+  if (incoming === 'failed') return current === 'pending' || current === 'sent'
+  if (current === 'failed') return false
   const currentIndex = ladderLevel(current)
   const incomingIndex = ladderLevel(incoming)
-
   if (incomingIndex < 0) return false
   if (currentIndex < 0) return true
-
   return incomingIndex > currentIndex
 }
 
@@ -759,11 +753,7 @@ async function handleStatusUpdate(status: WhatsAppStatus) {
   console.log('[WhatsApp Status Received]', JSON.stringify(status, null, 2))
 
   if (status.status === 'failed') {
-    console.error('[WhatsApp Delivery Failed]', {
-      wamid: status.id,
-      recipient: status.recipient_id,
-      errors: status.errors,
-    })
+    console.error('[WhatsApp Delivery Failed]', { wamid: status.id, recipient: status.recipient_id, errors: status.errors })
   }
 
   const { data: updatedMessages, error: msgErr } = await supabaseAdmin()
@@ -772,18 +762,12 @@ async function handleStatusUpdate(status: WhatsAppStatus) {
     .eq('message_id', status.id)
     .select('id, message_id, status')
 
-  if (msgErr) {
-    console.error('[WhatsApp Status] Error updating message status:', msgErr)
-  } else if (!updatedMessages || updatedMessages.length === 0) {
-    console.warn('[WhatsApp Status] No matching message row found for wamid:', status.id)
-  } else {
-    console.log('[WhatsApp Status] Updated message rows:', updatedMessages)
-  }
+  if (msgErr) console.error('[WhatsApp Status] Error updating message status:', msgErr)
+  else if (!updatedMessages || updatedMessages.length === 0) console.warn('[WhatsApp Status] No matching message row found for wamid:', status.id)
+  else console.log('[WhatsApp Status] Updated message rows:', updatedMessages)
 
   const timestampNumber = parseInt(status.timestamp, 10)
-  const tsIso = Number.isFinite(timestampNumber)
-    ? new Date(timestampNumber * 1000).toISOString()
-    : new Date().toISOString()
+  const tsIso = Number.isFinite(timestampNumber) ? new Date(timestampNumber * 1000).toISOString() : new Date().toISOString()
 
   const { data: recipient, error: recFetchErr } = await supabaseAdmin()
     .from('broadcast_recipients')
@@ -797,20 +781,9 @@ async function handleStatusUpdate(status: WhatsAppStatus) {
   }
 
   if (!recipient) return
+  if (!isValidStatusTransition(recipient.status, status.status)) return
 
-  if (!isValidStatusTransition(recipient.status, status.status)) {
-    console.warn('[WhatsApp Status] Ignored invalid broadcast status transition:', {
-      current: recipient.status,
-      incoming: status.status,
-      wamid: status.id,
-    })
-    return
-  }
-
-  const update: Record<string, unknown> = {
-    status: status.status,
-  }
-
+  const update: Record<string, unknown> = { status: status.status }
   if (status.status === 'sent') update.sent_at = tsIso
   if (status.status === 'delivered') update.delivered_at = tsIso
   if (status.status === 'read') update.read_at = tsIso
@@ -820,9 +793,7 @@ async function handleStatusUpdate(status: WhatsAppStatus) {
     .update(update)
     .eq('id', recipient.id)
 
-  if (recUpdateErr) {
-    console.error('[WhatsApp Status] Error updating broadcast recipient status:', recUpdateErr)
-  }
+  if (recUpdateErr) console.error('[WhatsApp Status] Error updating broadcast recipient status:', recUpdateErr)
 }
 
 async function flagBroadcastReplyIfAny(accountId: string, contactId: string) {
@@ -839,27 +810,18 @@ async function flagBroadcastReplyIfAny(accountId: string, contactId: string) {
     if (error || !recs || recs.length === 0) return
 
     const row = recs[0]
-
     const { error: updErr } = await supabaseAdmin()
       .from('broadcast_recipients')
-      .update({
-        status: 'replied',
-        replied_at: new Date().toISOString(),
-      })
+      .update({ status: 'replied', replied_at: new Date().toISOString() })
       .eq('id', row.id)
 
-    if (updErr) {
-      console.error('[webhook] Error marking broadcast recipient replied:', updErr)
-    }
+    if (updErr) console.error('[webhook] Error marking broadcast recipient replied:', updErr)
   } catch (err) {
     console.error('[webhook] flagBroadcastReplyIfAny failed:', err)
   }
 }
 
-async function lookupInternalIdByMetaId(
-  metaId: string,
-  conversationId: string
-): Promise<string | null> {
+async function lookupInternalIdByMetaId(metaId: string, conversationId: string): Promise<string | null> {
   const { data, error } = await supabaseAdmin()
     .from('messages')
     .select('id')
@@ -875,25 +837,14 @@ async function lookupInternalIdByMetaId(
   return data?.id ?? null
 }
 
-async function handleReaction(
-  message: WhatsAppMessage,
-  conversationId: string,
-  contactId: string
-) {
+async function handleReaction(message: WhatsAppMessage, conversationId: string, contactId: string) {
   const reaction = message.reaction
-
   if (!reaction?.message_id) return
 
-  const targetInternalId = await lookupInternalIdByMetaId(
-    reaction.message_id,
-    conversationId
-  )
+  const targetInternalId = await lookupInternalIdByMetaId(reaction.message_id, conversationId)
 
   if (!targetInternalId) {
-    console.warn(
-      '[webhook] reaction target message not found; skipping',
-      reaction.message_id
-    )
+    console.warn('[webhook] reaction target message not found; skipping', reaction.message_id)
     return
   }
 
@@ -905,10 +856,7 @@ async function handleReaction(
       .eq('actor_type', 'customer')
       .eq('actor_id', contactId)
 
-    if (delError) {
-      console.error('[webhook] reaction delete failed:', delError.message)
-    }
-
+    if (delError) console.error('[webhook] reaction delete failed:', delError.message)
     return
   }
 
@@ -925,9 +873,7 @@ async function handleReaction(
       { onConflict: 'message_id,actor_type,actor_id' }
     )
 
-  if (upsertError) {
-    console.error('[webhook] reaction upsert failed:', upsertError.message)
-  }
+  if (upsertError) console.error('[webhook] reaction upsert failed:', upsertError.message)
 }
 
 async function processMessage(
@@ -941,23 +887,12 @@ async function processMessage(
   const senderPhone = normalizePhone(message.from)
   const contactName = contact.profile.name
 
-  const contactOutcome = await findOrCreateContact(
-    accountId,
-    configOwnerUserId,
-    senderPhone,
-    contactName
-  )
-
+  const contactOutcome = await findOrCreateContact(accountId, configOwnerUserId, senderPhone, contactName)
   if (!contactOutcome) return
 
   const contactRecord = contactOutcome.contact
 
-  const conversation = await findOrCreateConversation(
-    accountId,
-    configOwnerUserId,
-    contactRecord.id
-  )
-
+  const conversation = await findOrCreateConversation(accountId, configOwnerUserId, contactRecord.id)
   if (!conversation) return
 
   if (message.type === 'reaction') {
@@ -965,40 +900,18 @@ async function processMessage(
     return
   }
 
-  const { contentText, mediaUrl, mediaType, interactiveReplyId } =
-    await parseMessageContent(message, accessToken)
+  const { contentText, mediaUrl, mediaType, interactiveReplyId } = await parseMessageContent(message, accessToken)
 
   let replyToInternalId: string | null = null
-
   if (message.context?.id) {
-    replyToInternalId = await lookupInternalIdByMetaId(
-      message.context.id,
-      conversation.id
-    )
-
-    if (!replyToInternalId) {
-      console.warn('[webhook] reply context parent not found:', message.context.id)
-    }
+    replyToInternalId = await lookupInternalIdByMetaId(message.context.id, conversation.id)
+    if (!replyToInternalId) console.warn('[webhook] reply context parent not found:', message.context.id)
   }
 
   void mediaType
 
-  const ALLOWED_CONTENT_TYPES = new Set([
-    'text',
-    'image',
-    'document',
-    'audio',
-    'video',
-    'location',
-    'template',
-    'interactive',
-  ])
-
-  const contentType = ALLOWED_CONTENT_TYPES.has(message.type)
-    ? message.type
-    : message.type === 'sticker'
-      ? 'image'
-      : 'text'
+  const ALLOWED_CONTENT_TYPES = new Set(['text', 'image', 'document', 'audio', 'video', 'location', 'template', 'interactive'])
+  const contentType = ALLOWED_CONTENT_TYPES.has(message.type) ? message.type : message.type === 'sticker' ? 'image' : 'text'
 
   const { count: priorCustomerMsgCount } = await supabaseAdmin()
     .from('messages')
@@ -1036,9 +949,7 @@ async function processMessage(
     })
     .eq('id', conversation.id)
 
-  if (convError) {
-    console.error('[webhook] Error updating conversation:', convError)
-  }
+  if (convError) console.error('[webhook] Error updating conversation:', convError)
 
   await flagBroadcastReplyIfAny(accountId, contactRecord.id)
 
@@ -1048,54 +959,27 @@ async function processMessage(
     contactId: contactRecord.id,
     conversationId: conversation.id,
     message: interactiveReplyId
-      ? {
-          kind: 'interactive_reply',
-          reply_id: interactiveReplyId,
-          reply_title: contentText ?? '',
-          meta_message_id: message.id,
-        }
-      : {
-          kind: 'text',
-          text: contentText ?? message.text?.body ?? '',
-          meta_message_id: message.id,
-        },
+      ? { kind: 'interactive_reply', reply_id: interactiveReplyId, reply_title: contentText ?? '', meta_message_id: message.id }
+      : { kind: 'text', text: contentText ?? message.text?.body ?? '', meta_message_id: message.id },
     isFirstInboundMessage,
   })
 
   const flowConsumed = flowResult.consumed
-
   const inboundText = contentText ?? message.text?.body ?? ''
-  const interactiveRawId = getInteractiveReplyId(message)
-  const interactiveRawTitle = getInteractiveReplyTitle(message)
+  const interactiveText = getInteractiveText(message)
 
-  const automationTriggers: (
-    | 'new_contact_created'
-    | 'first_inbound_message'
-    | 'new_message_received'
-    | 'keyword_match'
-  )[] = []
+  const automationTriggers: ('new_contact_created' | 'first_inbound_message' | 'new_message_received' | 'keyword_match')[] = []
 
-  if (!flowConsumed) {
-    automationTriggers.push('new_message_received', 'keyword_match')
-  }
-
-  if (contactOutcome.wasCreated) {
-    automationTriggers.unshift('new_contact_created')
-  }
-
-  if (isFirstInboundMessage) {
-    automationTriggers.unshift('first_inbound_message')
-  }
+  if (!flowConsumed) automationTriggers.push('new_message_received', 'keyword_match')
+  if (contactOutcome.wasCreated) automationTriggers.unshift('new_contact_created')
+  if (isFirstInboundMessage) automationTriggers.unshift('first_inbound_message')
 
   for (const triggerType of automationTriggers) {
     runAutomationsForTrigger({
       accountId,
       triggerType,
       contactId: contactRecord.id,
-      context: {
-        message_text: inboundText,
-        conversation_id: conversation.id,
-      },
+      context: { message_text: inboundText, conversation_id: conversation.id },
     }).catch((err) => console.error('[automations] dispatch failed:', err))
   }
 
@@ -1107,8 +991,7 @@ async function processMessage(
       accessToken,
       senderPhone,
       inboundText,
-      interactiveReplyId: interactiveRawId,
-      interactiveReplyTitle: interactiveRawTitle,
+      interactiveText,
     }).catch((err) => console.error('[Hybrid Bot] Error:', err))
   }
 }
@@ -1116,104 +999,47 @@ async function processMessage(
 async function parseMessageContent(
   message: WhatsAppMessage,
   accessToken: string
-): Promise<{
-  contentText: string | null
-  mediaUrl: string | null
-  mediaType: string | null
-  interactiveReplyId: string | null
-}> {
-  const verifyAndBuildUrl = async (
-    mediaId: string
-  ): Promise<string | null> => {
+): Promise<{ contentText: string | null; mediaUrl: string | null; mediaType: string | null; interactiveReplyId: string | null }> {
+  const verifyAndBuildUrl = async (mediaId: string): Promise<string | null> => {
     try {
       await getMediaUrl({ mediaId, accessToken })
       return `/api/whatsapp/media/${mediaId}`
     } catch (error) {
-      console.error(
-        `[webhook] Failed to verify media ${mediaId} with Meta:`,
-        error instanceof Error ? error.message : error
-      )
+      console.error(`[webhook] Failed to verify media ${mediaId} with Meta:`, error instanceof Error ? error.message : error)
       return null
     }
   }
 
-  const empty = {
-    contentText: null,
-    mediaUrl: null,
-    mediaType: null,
-    interactiveReplyId: null,
-  }
+  const empty = { contentText: null, mediaUrl: null, mediaType: null, interactiveReplyId: null }
 
   switch (message.type) {
     case 'text':
       return { ...empty, contentText: message.text?.body || null }
 
     case 'image':
-      if (message.image?.id) {
-        return {
-          ...empty,
-          contentText: message.image.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.image.id),
-          mediaType: message.image.mime_type,
-        }
-      }
+      if (message.image?.id) return { ...empty, contentText: message.image.caption || null, mediaUrl: await verifyAndBuildUrl(message.image.id), mediaType: message.image.mime_type }
       return empty
 
     case 'video':
-      if (message.video?.id) {
-        return {
-          ...empty,
-          contentText: message.video.caption || null,
-          mediaUrl: await verifyAndBuildUrl(message.video.id),
-          mediaType: message.video.mime_type,
-        }
-      }
+      if (message.video?.id) return { ...empty, contentText: message.video.caption || null, mediaUrl: await verifyAndBuildUrl(message.video.id), mediaType: message.video.mime_type }
       return empty
 
     case 'document':
-      if (message.document?.id) {
-        return {
-          ...empty,
-          contentText:
-            message.document.caption || message.document.filename || null,
-          mediaUrl: await verifyAndBuildUrl(message.document.id),
-          mediaType: message.document.mime_type,
-        }
-      }
+      if (message.document?.id) return { ...empty, contentText: message.document.caption || message.document.filename || null, mediaUrl: await verifyAndBuildUrl(message.document.id), mediaType: message.document.mime_type }
       return empty
 
     case 'audio':
-      if (message.audio?.id) {
-        return {
-          ...empty,
-          mediaUrl: await verifyAndBuildUrl(message.audio.id),
-          mediaType: message.audio.mime_type,
-        }
-      }
+      if (message.audio?.id) return { ...empty, mediaUrl: await verifyAndBuildUrl(message.audio.id), mediaType: message.audio.mime_type }
       return empty
 
     case 'sticker':
-      if (message.sticker?.id) {
-        return {
-          ...empty,
-          mediaUrl: await verifyAndBuildUrl(message.sticker.id),
-          mediaType: message.sticker.mime_type,
-        }
-      }
+      if (message.sticker?.id) return { ...empty, mediaUrl: await verifyAndBuildUrl(message.sticker.id), mediaType: message.sticker.mime_type }
       return empty
 
     case 'location':
       if (message.location) {
         const loc = message.location
-        const locationText = [
-          loc.name,
-          loc.address,
-          `${loc.latitude},${loc.longitude}`,
-        ]
-          .filter(Boolean)
-          .join(' - ')
-
-        return { ...empty, contentText: locationText }
+        return { ...empty, contentText: [loc.name, loc.address, `${loc.latitude},${loc.longitude}`].filter(Boolean).join(' - ') }
       }
       return empty
 
@@ -1221,29 +1047,16 @@ async function parseMessageContent(
       return { ...empty, contentText: message.reaction?.emoji || null }
 
     case 'interactive': {
-      const reply =
-        message.interactive?.button_reply ?? message.interactive?.list_reply
-
-      if (reply?.id) {
-        return {
-          ...empty,
-          contentText: reply.title || reply.id,
-          interactiveReplyId: reply.id,
-        }
-      }
-
+      const reply = message.interactive?.button_reply ?? message.interactive?.list_reply
+      if (reply?.id) return { ...empty, contentText: reply.title || reply.id, interactiveReplyId: reply.id }
       return { ...empty, contentText: '[Interactive reply]' }
     }
 
     default:
-      return {
-        ...empty,
-        contentText: `[Unsupported message type: ${message.type}]`,
-      }
+      return { ...empty, contentText: `[Unsupported message type: ${message.type}]` }
   }
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ContactRow = any
 
 interface ContactOutcome {
@@ -1257,11 +1070,7 @@ async function findOrCreateContact(
   phone: string,
   name: string
 ): Promise<ContactOutcome | null> {
-  const existingContact = await findExistingContact(
-    supabaseAdmin(),
-    accountId,
-    phone
-  )
+  const existingContact = await findExistingContact(supabaseAdmin(), accountId, phone)
 
   if (existingContact) {
     if (name && name !== existingContact.name) {
@@ -1276,23 +1085,13 @@ async function findOrCreateContact(
 
   const { data: newContact, error: createError } = await supabaseAdmin()
     .from('contacts')
-    .insert({
-      account_id: accountId,
-      user_id: configOwnerUserId,
-      phone,
-      name: name || phone,
-    })
+    .insert({ account_id: accountId, user_id: configOwnerUserId, phone, name: name || phone })
     .select()
     .single()
 
   if (createError) {
     if (isUniqueViolation(createError)) {
-      const raced = await findExistingContact(
-        supabaseAdmin(),
-        accountId,
-        phone
-      )
-
+      const raced = await findExistingContact(supabaseAdmin(), accountId, phone)
       if (raced) return { contact: raced, wasCreated: false }
     }
 
@@ -1303,11 +1102,7 @@ async function findOrCreateContact(
   return { contact: newContact, wasCreated: true }
 }
 
-async function findOrCreateConversation(
-  accountId: string,
-  configOwnerUserId: string,
-  contactId: string
-) {
+async function findOrCreateConversation(accountId: string, configOwnerUserId: string, contactId: string) {
   const { data: existing, error: findError } = await supabaseAdmin()
     .from('conversations')
     .select('*')
@@ -1315,17 +1110,11 @@ async function findOrCreateConversation(
     .eq('contact_id', contactId)
     .single()
 
-  if (!findError && existing) {
-    return existing
-  }
+  if (!findError && existing) return existing
 
   const { data: newConv, error: createError } = await supabaseAdmin()
     .from('conversations')
-    .insert({
-      account_id: accountId,
-      user_id: configOwnerUserId,
-      contact_id: contactId,
-    })
+    .insert({ account_id: accountId, user_id: configOwnerUserId, contact_id: contactId })
     .select()
     .single()
 
