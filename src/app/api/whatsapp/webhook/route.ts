@@ -14,7 +14,7 @@ import {
 } from '@/lib/whatsapp/template-webhook'
 
 // File path: src/app/api/whatsapp/webhook/route.ts
-// V2 Hybrid bot:
+// V3 Hybrid bot:
 // - Understands natural phrases like "Kalasalingam fees", "scholarship", "hostel", "Chettinad courses".
 // - Switches university context when user mentions another university.
 // - Does not repeat the menu unnecessarily after every answer.
@@ -107,28 +107,41 @@ function cleanText(input: string | null | undefined): string {
   return (input || '').trim().toLowerCase()
 }
 
+function isPureNumberChoice(text: string): boolean {
+  return /^[1-4]$/.test(cleanText(text))
+}
+
+// Detect university only from words. Do NOT treat 1/2 as university here,
+// because 1/2 also means Courses/Fees inside the menu.
 function detectUniversity(text: string): UniversityKey | null {
   const t = cleanText(text)
-  if (/\b(1|chettinad|care)\b/.test(t)) return 'chettinad'
-  if (/\b(2|kalasalingam|kare)\b/.test(t)) return 'kalasalingam'
+  if (/\b(chettinad|care)\b/.test(t)) return 'chettinad'
+  if (/\b(kalasalingam|kare)\b/.test(t)) return 'kalasalingam'
   return null
 }
 
+// Use this only when the bot is specifically asking the university question.
+function detectUniversitySelection(text: string): UniversityKey | null {
+  const t = cleanText(text)
+  if (t === '1') return 'chettinad'
+  if (t === '2') return 'kalasalingam'
+  return detectUniversity(text)
+}
+
+// Detect menu only from words. Do NOT treat 1/2/3/4 as menu globally,
+// because 1/2 means university in the university selection step.
 function detectMenu(text: string): MenuKey | null {
   const t = cleanText(text)
 
-  if (/^(1)$/.test(t) || /\b(course|courses|program|programs|programme|programmes|branch|branches)\b/.test(t)) {
+  if (/\b(course|courses|program|programs|programme|programmes|branch|branches)\b/.test(t)) {
     return 'courses'
   }
 
-  if (
-    /^(2)$/.test(t) ||
-    /\b(fee|fees|tuition|scholarship|scholarships|hostel|hostel fee|hostel fees|cost|amount)\b/.test(t)
-  ) {
+  if (/\b(fee|fees|tuition|scholarship|scholarships|hostel|hostel fee|hostel fees|cost|amount)\b/.test(t)) {
     return 'fees'
   }
 
-  if (/^(3)$/.test(t) || /\b(office|address|location|contact|phone|administration)\b/.test(t)) {
+  if (/\b(office|address|location|contact|phone|administration)\b/.test(t)) {
     return 'office'
   }
 
@@ -140,11 +153,21 @@ function detectMenu(text: string): MenuKey | null {
     return 'facilities'
   }
 
-  if (/^(4)$/.test(t) || /\b(other|others|custom|question|help)\b/.test(t)) {
+  if (/\b(other|others|custom|question|help)\b/.test(t)) {
     return 'others'
   }
 
   return null
+}
+
+// Use this only after a university is already selected and we are asking menu.
+function detectMenuSelection(text: string): MenuKey | null {
+  const t = cleanText(text)
+  if (t === '1') return 'courses'
+  if (t === '2') return 'fees'
+  if (t === '3') return 'office'
+  if (t === '4') return 'others'
+  return detectMenu(text)
 }
 
 function getInteractiveText(message: WhatsAppMessage): string | null {
@@ -318,11 +341,13 @@ Admission help: 9676232325`
   }
 
   if (menu === 'fees') {
-    return `💰 Chettinad fee details vary by program.
+    return `💰 Chettinad Fees:
 
-Available streams include Medicine, Allied Health Sciences, Nursing, Architecture, Pharmacy, Physiotherapy, Occupational Therapy, and Law.
+Exact Chettinad fee details vary by program and are not listed in the provided knowledge document.
 
-For exact latest fees, eligibility, and admission process, please contact KB EDU Tech counselor:
+Programs include Medicine, Allied Health Sciences, Nursing, Architecture, Pharmacy, Physiotherapy, Occupational Therapy, and Law.
+
+For exact latest Chettinad fees, eligibility, and admission process, please contact KB EDU Tech counselor:
 
 📞 9676232325
 
@@ -444,29 +469,62 @@ async function handleHybridBotFlow(params: {
   const currentState = botStateMemory[senderPhone]
   const userText = interactiveText || inboundText
   const mentionedUniversity = detectUniversity(userText)
-  const requestedMenu = detectMenu(userText)
+  const keywordMenu = detectMenu(userText)
+
+  // Strong fee/scholarship/hostel guard:
+  // If user asks fees/scholarship/hostel, answer ONLY for:
+  // 1) the university explicitly mentioned in the same message, OR
+  // 2) the currently selected university.
+  // If no university context is available, ask the user to select one first.
+  if (keywordMenu === 'fees' && !isPureNumberChoice(userText)) {
+    const feeUniversity = mentionedUniversity || currentState?.selectedUniversity
+
+    if (!feeUniversity) {
+      botStateMemory[senderPhone] = {
+        ...(currentState || { stage: 'waiting_for_university' as BotStage }),
+        stage: 'waiting_for_university',
+      }
+
+      await sendBotText(
+        `Sure 😊 Please select the university for fee/scholarship/hostel details:\n\n1️⃣ Chettinad Academy of Research and Education\n2️⃣ Kalasalingam Academy of Research and Education\n\nReply with 1 or 2.`
+      )
+      return
+    }
+
+    botStateMemory[senderPhone] = {
+      ...(currentState || { stage: 'waiting_for_menu_choice' as BotStage }),
+      stage: 'waiting_for_menu_choice',
+      selectedUniversity: feeUniversity,
+    }
+
+    await sendBotText(getStaticAnswer(feeUniversity, 'fees'))
+    await sendBotText(getShortMenuHint(feeUniversity))
+    return
+  }
 
   // Direct shortcut: user types "Kalasalingam fees", "Chettinad courses", etc.
-  if (mentionedUniversity && requestedMenu && requestedMenu !== 'others') {
+  // This shortcut intentionally ignores pure number choices to avoid confusion.
+  if (mentionedUniversity && keywordMenu && keywordMenu !== 'others') {
     botStateMemory[senderPhone] = {
       ...(currentState || { stage: 'waiting_for_menu_choice' as BotStage }),
       stage: 'waiting_for_menu_choice',
       selectedUniversity: mentionedUniversity,
     }
 
-    await sendBotText(getStaticAnswer(mentionedUniversity, requestedMenu))
+    await sendBotText(getStaticAnswer(mentionedUniversity, keywordMenu))
     await sendBotText(getShortMenuHint(mentionedUniversity))
     return
   }
 
-  // Existing selected university + direct menu keyword: "scholarship", "hostel", "courses"
-  if (currentState?.selectedUniversity && requestedMenu && requestedMenu !== 'others') {
+  // Existing selected university + direct menu keyword: "scholarship", "hostel", "courses".
+  // Do not handle pure number choices here before state checks.
+  if (currentState?.selectedUniversity && keywordMenu && keywordMenu !== 'others' && !isPureNumberChoice(userText)) {
     botStateMemory[senderPhone] = {
       ...currentState,
       stage: 'waiting_for_menu_choice',
     }
 
-    await sendBotText(getStaticAnswer(currentState.selectedUniversity, requestedMenu))
+    await sendBotText(getStaticAnswer(currentState.selectedUniversity, keywordMenu))
     await sendBotText(getShortMenuHint(currentState.selectedUniversity))
     return
   }
@@ -492,7 +550,7 @@ async function handleHybridBotFlow(params: {
   }
 
   if (currentState.stage === 'waiting_for_university') {
-    const university = mentionedUniversity
+    const university = detectUniversitySelection(userText)
 
     if (!university) {
       await sendBotText(getUniversitySelectionMessage(currentState.name))
@@ -510,6 +568,7 @@ async function handleHybridBotFlow(params: {
   }
 
   if (currentState.stage === 'waiting_for_menu_choice') {
+    const requestedMenu = detectMenuSelection(userText)
     const selectedUniversity = mentionedUniversity || currentState.selectedUniversity
 
     if (!selectedUniversity) {
@@ -549,6 +608,7 @@ async function handleHybridBotFlow(params: {
 
   if (currentState.stage === 'waiting_for_custom_question') {
     // Before using OpenAI, still catch simple keywords to reduce cost.
+    const requestedMenu = detectMenuSelection(userText)
     const universityForQuestion = mentionedUniversity || currentState.selectedUniversity
 
     if (universityForQuestion && requestedMenu && requestedMenu !== 'others') {
