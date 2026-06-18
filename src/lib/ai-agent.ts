@@ -204,7 +204,6 @@ export async function sendWhatsAppReply(
     }
 
     console.log('[AI Agent] WhatsApp reply sent successfully. Meta message ID:', result.messageId)
-
     return result.messageId
   } catch (error) {
     console.error('[AI Agent] Send WhatsApp reply FULL ERROR:', error)
