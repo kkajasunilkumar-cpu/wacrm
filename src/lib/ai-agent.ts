@@ -1,3 +1,4 @@
+import { sendTextMessage } from '@/lib/whatsapp/meta-api'
 // ── KBEduTech AI Agent ─────────────────────────────────────────
 // Drop this file in: src/lib/ai-agent.ts
 // Then call handleAIAgent() from the webhook route after saving the message
@@ -179,48 +180,16 @@ export async function sendWhatsAppReply(
   message: string
 ): Promise<boolean> {
   try {
-    const response = await fetch(
-      `https://graph.facebook.com/v25.0/${phoneNumberId}/messages`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${accessToken}`,
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          to,
-          type: "interactive",
-          interactive: {
-            type: "button",
-            body: { text: message },
-            action: {
-              buttons: [
-                {
-                  type: "reply",
-                  reply: { id: "TALK_TO_AGENT", title: "Talk to Agent 👤" }
-                },
-                {
-                  type: "reply",
-                  reply: { id: "KNOW_MORE", title: "Know More 📚" }
-                }
-              ]
-            }
-          }
-        }),
-      }
-    );
-
-    const result = await response.json();
-    console.log("Meta API full response:", JSON.stringify(result));
-    if (result.messages?.[0]?.id) {
-      console.log("AI reply sent successfully:", result.messages[0].id);
-      return true;
-    }
-    console.error("Failed to send AI reply:", JSON.stringify(result));
-    return false;
+    const result = await sendTextMessage({
+      phoneNumberId,
+      accessToken,
+      to,
+      text: message,
+    })
+    console.log("AI reply sent successfully:", result.messageId)
+    return true
   } catch (error) {
-    console.error("Send WhatsApp reply error:", error);
-    return false;
+    console.error("Send WhatsApp reply error:", error)
+    return false
   }
 }
