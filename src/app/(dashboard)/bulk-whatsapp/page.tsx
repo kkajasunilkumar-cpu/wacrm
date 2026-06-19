@@ -34,7 +34,7 @@ interface ConnectionStatus {
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const BAILEYS_URL = process.env.NEXT_PUBLIC_BAILEYS_URL || 'http://localhost:3001';
+const BAILEYS_URL = '/api/baileys';
 
 // ── Main  Component ─────────────────────────────────────────────────────────
 export default function BulkWhatsAppPage() {
