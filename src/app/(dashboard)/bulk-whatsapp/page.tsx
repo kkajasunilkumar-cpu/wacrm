@@ -36,7 +36,7 @@ interface ConnectionStatus {
 // ── Config ─────────────────────────────────────────────────────────────────
 const BAILEYS_URL = process.env.NEXT_PUBLIC_BAILEYS_URL || 'http://localhost:3001';
 
-// ── Main Component ─────────────────────────────────────────────────────────
+// ── Main  Component ─────────────────────────────────────────────────────────
 export default function BulkWhatsAppPage() {
   const [connection, setConnection] = useState<ConnectionStatus>({ status: 'disconnected', hasQR: false });
   const [qrImage, setQrImage] = useState<string | null>(null);
