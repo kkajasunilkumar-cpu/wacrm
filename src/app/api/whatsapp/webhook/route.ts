@@ -350,7 +350,7 @@ Admission help: 9676232325`
   if (menu === 'fees') {
     return `💰 Chettinad Fees:
 
-Exact Chettinad fee details vary by program and are not listed in the provided knowledge document.
+No worries 😊 Our KB EDU Tech counselor will contact you and share the correct/latest details.
 
 Programs include Medicine, Allied Health Sciences, Nursing, Architecture, Pharmacy, Physiotherapy, Occupational Therapy, and Law.
 
