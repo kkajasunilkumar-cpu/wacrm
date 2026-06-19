@@ -1,5 +1,8 @@
 "use client"
 
+// KB EDU Tech Premium Dashboard v6 — TypeScript-safe Supabase queries.
+// IMPORTANT: This file intentionally casts createClient() as any to avoid Hostinger build failures from Supabase nested/query-builder type inference.
+
 import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import {
@@ -30,20 +33,36 @@ type ContactRow = {
   created_at: string | null
 }
 
+type ContactTagRawRow = {
+  contact_id: string
+  tag_id: string | null
+}
+
+type TagMasterRow = {
+  id: string
+  name: string | null
+}
+
+type ContactCustomValueRawRow = {
+  contact_id: string
+  custom_field_id: string | null
+  value: string | null
+}
+
+type CustomFieldMasterRow = {
+  id: string
+  name: string | null
+}
+
 type TagRow = {
   contact_id: string
-  tags?: {
-    id?: string
-    name?: string | null
-  } | null
+  tag_name: string | null
 }
 
 type CustomValueRow = {
   contact_id: string
+  field_name: string | null
   value: string | null
-  custom_fields?: {
-    name?: string | null
-  } | null
 }
 
 type MessageRow = {
@@ -60,7 +79,7 @@ type DashboardData = {
   messagesToday: MessageRow[]
   conversationsCount: number
   broadcastCount: number
-  dataWarnings: string[]
+  warnings: string[]
 }
 
 const EMPTY_DATA: DashboardData = {
@@ -70,17 +89,17 @@ const EMPTY_DATA: DashboardData = {
   messagesToday: [],
   conversationsCount: 0,
   broadcastCount: 0,
-  dataWarnings: [],
+  warnings: [],
+}
+
+function normalize(value?: string | null) {
+  return (value || "").trim().toLowerCase()
 }
 
 function startOfTodayIso() {
   const date = new Date()
   date.setHours(0, 0, 0, 0)
   return date.toISOString()
-}
-
-function normalize(value?: string | null) {
-  return (value || "").trim().toLowerCase()
 }
 
 function asDate(value?: string | null) {
@@ -93,7 +112,11 @@ function isToday(value?: string | null) {
   const d = asDate(value)
   if (!d) return false
   const today = new Date()
-  return d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && d.getDate() === today.getDate()
+  return (
+    d.getFullYear() === today.getFullYear() &&
+    d.getMonth() === today.getMonth() &&
+    d.getDate() === today.getDate()
+  )
 }
 
 function isDueOrOverdue(value?: string | null) {
@@ -107,7 +130,7 @@ function isDueOrOverdue(value?: string | null) {
 function getContactTags(tagRows: TagRow[], contactId: string) {
   return tagRows
     .filter((row) => row.contact_id === contactId)
-    .map((row) => row.tags?.name)
+    .map((row) => row.tag_name)
     .filter(Boolean) as string[]
 }
 
@@ -115,15 +138,16 @@ function getFieldValue(customRows: CustomValueRow[], contactId: string, fieldNam
   const row = customRows.find(
     (item) =>
       item.contact_id === contactId &&
-      normalize(item.custom_fields?.name) === normalize(fieldName),
+      normalize(item.field_name) === normalize(fieldName),
   )
+
   return row?.value || ""
 }
 
 function countContactsWithTag(tagRows: TagRow[], tagName: string) {
   return new Set(
     tagRows
-      .filter((row) => normalize(row.tags?.name) === normalize(tagName))
+      .filter((row) => normalize(row.tag_name) === normalize(tagName))
       .map((row) => row.contact_id),
   ).size
 }
@@ -131,24 +155,10 @@ function countContactsWithTag(tagRows: TagRow[], tagName: string) {
 function countContactsWithField(customRows: CustomValueRow[], fieldName: string, matcher: (value: string) => boolean) {
   return new Set(
     customRows
-      .filter((row) => normalize(row.custom_fields?.name) === normalize(fieldName))
+      .filter((row) => normalize(row.field_name) === normalize(fieldName))
       .filter((row) => matcher(row.value || ""))
       .map((row) => row.contact_id),
   ).size
-}
-
-async function safeQuery<T>(label: string, query: PromiseLike<{ data: T | null; error: unknown }>) {
-  try {
-    const result = await query
-    if (result.error) {
-      console.warn(`[Admissions dashboard] ${label} query failed`, result.error)
-      return { data: null as T | null, warning: label }
-    }
-    return { data: result.data, warning: null as string | null }
-  } catch (error) {
-    console.warn(`[Admissions dashboard] ${label} query failed`, error)
-    return { data: null as T | null, warning: label }
-  }
 }
 
 export default function DashboardPage() {
@@ -157,50 +167,131 @@ export default function DashboardPage() {
 
   const loadDashboard = useCallback(async () => {
     setLoading(true)
-    const db = createClient()
+    const db = createClient() as any
     const todayIso = startOfTodayIso()
+    const warnings: string[] = []
 
-    const [contactsResult, tagsResult, customValuesResult, messagesResult, conversationsResult, broadcastsResult] =
-      await Promise.all([
-        safeQuery<ContactRow[]>(
-          "contacts",
-          db.from("contacts").select("id,name,phone,created_at").order("created_at", { ascending: false }).limit(1000),
-        ),
-        safeQuery<TagRow[]>(
-          "contact_tags",
-          db.from("contact_tags").select("contact_id,tags(id,name)").limit(5000),
-        ),
-        safeQuery<CustomValueRow[]>(
-          "contact_custom_values",
-          db.from("contact_custom_values").select("contact_id,value,custom_fields(name)").limit(5000),
-        ),
-        safeQuery<MessageRow[]>(
-          "messages",
-          db.from("messages").select("id,sender_type,status,created_at").gte("created_at", todayIso).limit(2000),
-        ),
-        safeQuery<unknown[]>("conversations", db.from("conversations").select("id", { count: "exact", head: false }).limit(1)),
-        safeQuery<unknown[]>("broadcasts", db.from("broadcasts").select("id", { count: "exact", head: false }).limit(1)),
-      ])
+    try {
+      const contactsQuery = await db
+        .from("contacts")
+        .select("id,name,phone,created_at")
+        .order("created_at", { ascending: false })
+        .limit(1000)
 
-    const warnings = [
-      contactsResult.warning,
-      tagsResult.warning,
-      customValuesResult.warning,
-      messagesResult.warning,
-      conversationsResult.warning,
-      broadcastsResult.warning,
-    ].filter(Boolean) as string[]
+      if (contactsQuery.error) {
+        console.warn("[Dashboard] contacts query failed", contactsQuery.error)
+        warnings.push("contacts")
+      }
 
-    setData({
-      contacts: contactsResult.data || [],
-      tagRows: tagsResult.data || [],
-      customRows: customValuesResult.data || [],
-      messagesToday: messagesResult.data || [],
-      conversationsCount: Array.isArray(conversationsResult.data) ? conversationsResult.data.length : 0,
-      broadcastCount: Array.isArray(broadcastsResult.data) ? broadcastsResult.data.length : 0,
-      dataWarnings: warnings,
-    })
-    setLoading(false)
+      const contactTagsQuery = await db
+        .from("contact_tags")
+        .select("contact_id,tag_id")
+        .limit(5000)
+
+      if (contactTagsQuery.error) {
+        console.warn("[Dashboard] contact_tags query failed", contactTagsQuery.error)
+        warnings.push("contact_tags")
+      }
+
+      const tagMastersQuery = await db
+        .from("tags")
+        .select("id,name")
+        .limit(5000)
+
+      if (tagMastersQuery.error) {
+        console.warn("[Dashboard] tags query failed", tagMastersQuery.error)
+        warnings.push("tags")
+      }
+
+      const customValuesQuery = await db
+        .from("contact_custom_values")
+        .select("contact_id,custom_field_id,value")
+        .limit(5000)
+
+      if (customValuesQuery.error) {
+        console.warn("[Dashboard] contact_custom_values query failed", customValuesQuery.error)
+        warnings.push("contact_custom_values")
+      }
+
+      const customFieldsQuery = await db
+        .from("custom_fields")
+        .select("id,name")
+        .limit(5000)
+
+      if (customFieldsQuery.error) {
+        console.warn("[Dashboard] custom_fields query failed", customFieldsQuery.error)
+        warnings.push("custom_fields")
+      }
+
+      const messagesQuery = await db
+        .from("messages")
+        .select("id,sender_type,status,created_at")
+        .gte("created_at", todayIso)
+        .limit(2000)
+
+      if (messagesQuery.error) {
+        console.warn("[Dashboard] messages query failed", messagesQuery.error)
+        warnings.push("messages")
+      }
+
+      const conversationsQuery = await db
+        .from("conversations")
+        .select("id", { count: "exact", head: true })
+
+      if (conversationsQuery.error) {
+        console.warn("[Dashboard] conversations query failed", conversationsQuery.error)
+        warnings.push("conversations")
+      }
+
+      const broadcastsQuery = await db
+        .from("broadcasts")
+        .select("id", { count: "exact", head: true })
+
+      if (broadcastsQuery.error) {
+        console.warn("[Dashboard] broadcasts query failed", broadcastsQuery.error)
+        warnings.push("broadcasts")
+      }
+
+      const contacts = (contactsQuery.data || []) as ContactRow[]
+      const contactTags = (contactTagsQuery.data || []) as ContactTagRawRow[]
+      const tagMasters = (tagMastersQuery.data || []) as TagMasterRow[]
+      const customValues = (customValuesQuery.data || []) as ContactCustomValueRawRow[]
+      const customFields = (customFieldsQuery.data || []) as CustomFieldMasterRow[]
+
+      const tagNameById = new Map<string, string | null>(
+        tagMasters.map((tag) => [tag.id, tag.name]),
+      )
+
+      const fieldNameById = new Map<string, string | null>(
+        customFields.map((field) => [field.id, field.name]),
+      )
+
+      const tagRows: TagRow[] = contactTags.map((row) => ({
+        contact_id: row.contact_id,
+        tag_name: row.tag_id ? tagNameById.get(row.tag_id) || null : null,
+      }))
+
+      const customRows: CustomValueRow[] = customValues.map((row) => ({
+        contact_id: row.contact_id,
+        field_name: row.custom_field_id ? fieldNameById.get(row.custom_field_id) || null : null,
+        value: row.value,
+      }))
+
+      setData({
+        contacts,
+        tagRows,
+        customRows,
+        messagesToday: (messagesQuery.data || []) as MessageRow[],
+        conversationsCount: conversationsQuery.count || 0,
+        broadcastCount: broadcastsQuery.count || 0,
+        warnings,
+      })
+    } catch (error) {
+      console.error("[Admissions dashboard] failed to load", error)
+      setData({ ...EMPTY_DATA, warnings: ["dashboard"] })
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -219,11 +310,7 @@ export default function DashboardPage() {
     const chettinad = countContactsWithTag(data.tagRows, "Chettinad Lead")
     const placementsAsked = countContactsWithTag(data.tagRows, "Placements Asked")
     const officeAsked = countContactsWithTag(data.tagRows, "Office / Contact Asked")
-    const highPriority = countContactsWithField(
-      data.customRows,
-      "Follow-up Priority",
-      (value) => normalize(value) === "high",
-    )
+    const highPriority = countContactsWithField(data.customRows, "Follow-up Priority", (value) => normalize(value) === "high")
     const followUpsDue = countContactsWithField(data.customRows, "Follow-Up Date", (value) => isDueOrOverdue(value))
     const messagesSent = data.messagesToday.filter((message) => message.sender_type === "agent").length
     const incomingToday = data.messagesToday.filter((message) => message.sender_type === "customer").length
@@ -250,14 +337,12 @@ export default function DashboardPage() {
   const leadRows = useMemo(() => {
     return data.contacts
       .map((contact) => {
-        const tags = getContactTags(data.tagRows, contact.id)
         const leadScore = Number(getFieldValue(data.customRows, contact.id, "Lead Score") || "0")
         const university = getFieldValue(data.customRows, contact.id, "Interested University")
         const askedAbout = getFieldValue(data.customRows, contact.id, "Asked About")
-        const followUpDate = getFieldValue(data.customRows, contact.id, "Follow-Up Date")
         const priority = getFieldValue(data.customRows, contact.id, "Follow-up Priority")
         const status = getFieldValue(data.customRows, contact.id, "Lead Status")
-        return { ...contact, tags, leadScore, university, askedAbout, followUpDate, priority, status }
+        return { ...contact, leadScore, university, askedAbout, priority, status }
       })
       .sort((a, b) => {
         const priorityA = normalize(a.priority) === "high" ? 100 : 0
@@ -287,9 +372,9 @@ export default function DashboardPage() {
             <p className="mt-2 max-w-2xl text-sm text-slate-300">
               Track student leads, university interest, fees enquiries, scholarship intent, follow-ups, and admissions performance.
             </p>
-            {data.dataWarnings.length > 0 ? (
+            {data.warnings.length > 0 ? (
               <p className="mt-3 text-xs text-amber-300">
-                Some dashboard widgets could not load: {data.dataWarnings.join(", ")}. Core CRM still works.
+                Some widgets could not load: {data.warnings.join(", ")}. Core CRM still works.
               </p>
             ) : null}
           </div>
