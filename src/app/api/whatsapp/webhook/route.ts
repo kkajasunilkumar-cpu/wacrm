@@ -204,9 +204,14 @@ function parseNameLocation(text: string): { name: string; location: string } {
 }
 
 function getGreetingMessage() {
-  return `👋 Welcome to KB EDU Tech!
+  return `👋 Welcome to KB EDU Tech — Admissions Support
 
-We help students with admissions, courses, fees, scholarships, hostel details, and university guidance.
+We’ll help you with:
+• Courses
+• Fees & scholarships
+• Hostel details
+• Placements
+• Admission guidance
 
 Please share your details:
 
@@ -217,7 +222,7 @@ Location:`
 function getUniversitySelectionMessage(name?: string) {
   return `Thank you${name ? `, ${name}` : ''} 😊
 
-Please select a university:
+Please choose the university you’re interested in:
 
 1️⃣ Chettinad Academy of Research and Education
 2️⃣ Kalasalingam Academy of Research and Education
@@ -226,22 +231,24 @@ Reply with 1 or 2.`
 }
 
 function getMenuMessage(university: UniversityKey) {
-  return `What would you like to know about ${UNIVERSITY_LABELS[university]}?
+  return `✅ You’re exploring ${UNIVERSITY_LABELS[university]}.
+
+What would you like to know?
 
 1️⃣ Courses
 2️⃣ Fees / Scholarships / Hostel
 3️⃣ Office / Contact
-4️⃣ Ask a custom question
+4️⃣ Ask your own question
 
 You can also type directly, like:
-"Kalasalingam fees" or "Chettinad courses".`
+“Kalasalingam fees” or “Chettinad courses”.`
 }
 
 function getShortMenuHint(university: UniversityKey) {
-  return `Need anything else about ${UNIVERSITY_LABELS[university]}?
+  return `Need more help with ${UNIVERSITY_LABELS[university]}?
 
 Reply:
-1 Courses | 2 Fees/Scholarship/Hostel | 3 Office | 4 Custom question`
+1 Courses | 2 Fees | 3 Office | 4 Ask Question`
 }
 
 function getStaticAnswer(university: UniversityKey, menu: Exclude<MenuKey, 'others'>) {
@@ -391,7 +398,9 @@ KB EDU Tech Hyderabad support:
 }
 
 function getOthersPrompt(university?: UniversityKey) {
-  return `Sure 😊 Please type your specific question${university ? ` about ${UNIVERSITY_LABELS[university]}` : ''}.`
+  return `Sure 😊 Please type your specific question${university ? ` about ${UNIVERSITY_LABELS[university]}` : ''}.
+
+Example: placements, eligibility, hostel, scholarship, admission process.`
 }
 
 async function sendAndStoreAgentMessage(params: {
@@ -437,9 +446,383 @@ async function sendAndStoreAgentMessage(params: {
   return metaMessageId
 }
 
+
+async function getOrCreateCustomField(params: {
+  accountId: string
+  userId: string
+  fieldName: string
+  fieldType?: string
+  fieldOptions?: unknown
+}): Promise<string | null> {
+  const { accountId, userId, fieldName, fieldType = 'text', fieldOptions = null } = params
+
+  const { data: existing, error: findError } = await supabaseAdmin()
+    .from('custom_fields')
+    .select('id')
+    .eq('account_id', accountId)
+    .eq('field_name', fieldName)
+    .maybeSingle()
+
+  if (findError) {
+    console.error('[CRM] Error finding custom field:', fieldName, findError)
+    return null
+  }
+
+  if (existing?.id) return existing.id
+
+  const { data: created, error: createError } = await supabaseAdmin()
+    .from('custom_fields')
+    .insert({
+      account_id: accountId,
+      user_id: userId,
+      field_name: fieldName,
+      field_type: fieldType,
+      field_options: fieldOptions,
+    })
+    .select('id')
+    .single()
+
+  if (createError) {
+    console.error('[CRM] Error creating custom field:', fieldName, createError)
+    return null
+  }
+
+  return created.id
+}
+
+async function setContactCustomValue(params: {
+  accountId: string
+  userId: string
+  contactId: string
+  fieldName: string
+  value: string
+  fieldType?: string
+  fieldOptions?: unknown
+}) {
+  const { accountId, userId, contactId, fieldName, value, fieldType, fieldOptions } = params
+
+  if (!value) return
+
+  const fieldId = await getOrCreateCustomField({
+    accountId,
+    userId,
+    fieldName,
+    fieldType,
+    fieldOptions,
+  })
+
+  if (!fieldId) return
+
+  const { error } = await supabaseAdmin()
+    .from('contact_custom_values')
+    .upsert(
+      {
+        contact_id: contactId,
+        custom_field_id: fieldId,
+        value,
+      },
+      { onConflict: 'contact_id,custom_field_id' }
+    )
+
+  if (error) {
+    console.error('[CRM] Error setting custom value:', fieldName, error)
+  }
+}
+
+async function addContactTag(params: {
+  accountId: string
+  userId: string
+  contactId: string
+  tagName: string
+  color?: string
+}) {
+  const { accountId, userId, contactId, tagName, color = '#7c3aed' } = params
+
+  let tagId: string | null = null
+
+  const { data: existing, error: findError } = await supabaseAdmin()
+    .from('tags')
+    .select('id')
+    .eq('account_id', accountId)
+    .eq('name', tagName)
+    .maybeSingle()
+
+  if (findError) {
+    console.error('[CRM] Error finding tag:', tagName, findError)
+    return
+  }
+
+  if (existing?.id) {
+    tagId = existing.id
+  } else {
+    const { data: created, error: createError } = await supabaseAdmin()
+      .from('tags')
+      .insert({
+        account_id: accountId,
+        user_id: userId,
+        name: tagName,
+        color,
+      })
+      .select('id')
+      .single()
+
+    if (createError) {
+      console.error('[CRM] Error creating tag:', tagName, createError)
+      return
+    }
+
+    tagId = created.id
+  }
+
+  if (!tagId) return
+
+  const { error: linkError } = await supabaseAdmin()
+    .from('contact_tags')
+    .upsert(
+      {
+        contact_id: contactId,
+        tag_id: tagId,
+      },
+      { onConflict: 'contact_id,tag_id' }
+    )
+
+  if (linkError) {
+    console.error('[CRM] Error applying tag:', tagName, linkError)
+  }
+}
+
+function universityToCrmValue(university?: UniversityKey): string | null {
+  if (!university) return null
+  return UNIVERSITY_LABELS[university]
+}
+
+function menuToAskedAbout(menu: MenuKey): string {
+  if (menu === 'fees') return 'Fees / Scholarship / Hostel'
+  if (menu === 'courses') return 'Courses'
+  if (menu === 'office') return 'Office / Contact'
+  if (menu === 'placements') return 'Placements'
+  if (menu === 'facilities') return 'Facilities'
+  return 'Custom Question'
+}
+
+function menuToLeadStatus(menu: MenuKey): string {
+  if (menu === 'fees') return 'Fees Shared'
+  if (menu === 'courses') return 'Courses Shared'
+  if (menu === 'office') return 'Counselor Follow-up Needed'
+  if (menu === 'placements') return 'Hot Lead'
+  if (menu === 'facilities') return 'Details Shared'
+  return 'Counselor Follow-up Needed'
+}
+
+function buildLeadTags(university: UniversityKey, menu?: MenuKey): string[] {
+  const tags = [university === 'kalasalingam' ? 'Kalasalingam Lead' : 'Chettinad Lead']
+
+  if (!menu) return tags
+
+  if (menu === 'courses') tags.push('Courses Asked')
+  if (menu === 'fees') tags.push('Fees Asked', 'Scholarship Asked', 'Follow-up Required')
+  if (menu === 'office') tags.push('Office / Contact Asked', 'Hot Lead', 'Follow-up Required')
+  if (menu === 'placements') tags.push('Placements Asked', 'Hot Lead', 'Follow-up Required')
+  if (menu === 'facilities') tags.push('Facilities Asked')
+  if (menu === 'others') tags.push('Custom Question', 'Follow-up Required')
+
+  return tags
+}
+
+function calculateLeadScore(params: {
+  selectedUniversity?: UniversityKey
+  askedAbout?: string
+  leadStatus?: string
+  followUpRequired?: boolean
+}): string {
+  let score = 10
+
+  if (params.selectedUniversity) score += 20
+  if (params.askedAbout?.includes('Courses')) score += 10
+  if (params.askedAbout?.includes('Fees')) score += 25
+  if (params.askedAbout?.includes('Scholarship')) score += 25
+  if (params.askedAbout?.includes('Office')) score += 35
+  if (params.askedAbout?.includes('Placements')) score += 30
+  if (params.askedAbout?.includes('Custom')) score += 25
+  if (params.leadStatus === 'Hot Lead') score += 20
+  if (params.followUpRequired) score += 15
+
+  return String(Math.min(score, 100))
+}
+
+async function updateContactCrm(params: {
+  accountId: string
+  userId: string
+  contactId: string
+  name?: string
+  location?: string
+  selectedUniversity?: UniversityKey
+  askedAbout?: string
+  leadStatus?: string
+  tags?: string[]
+  followUpRequired?: boolean
+}) {
+  const {
+    accountId,
+    userId,
+    contactId,
+    name,
+    location,
+    selectedUniversity,
+    askedAbout,
+    leadStatus,
+    tags = [],
+    followUpRequired,
+  } = params
+
+  if (name) {
+    const { error } = await supabaseAdmin()
+      .from('contacts')
+      .update({ name, updated_at: new Date().toISOString() })
+      .eq('id', contactId)
+
+    if (error) console.error('[CRM] Error updating contact name:', error)
+  }
+
+  await setContactCustomValue({
+    accountId,
+    userId,
+    contactId,
+    fieldName: 'Source',
+    value: 'WhatsApp Bot',
+    fieldType: 'dropdown',
+    fieldOptions: ['WhatsApp Bot', 'Manual Entry', 'Broadcast', 'Referral', 'Website', 'Instagram', 'Facebook'],
+  })
+
+  if (location) {
+    await setContactCustomValue({ accountId, userId, contactId, fieldName: 'Location', value: location })
+  }
+
+  const universityValue = universityToCrmValue(selectedUniversity)
+  if (universityValue) {
+    await setContactCustomValue({
+      accountId,
+      userId,
+      contactId,
+      fieldName: 'Interested University',
+      value: universityValue,
+      fieldType: 'dropdown',
+      fieldOptions: [
+        'Chettinad Academy of Research and Education',
+        'Kalasalingam Academy of Research and Education',
+        'Not selected yet',
+      ],
+    })
+  }
+
+  if (askedAbout) {
+    await setContactCustomValue({
+      accountId,
+      userId,
+      contactId,
+      fieldName: 'Asked About',
+      value: askedAbout,
+      fieldType: 'dropdown',
+      fieldOptions: [
+        'Courses',
+        'Fees / Scholarship / Hostel',
+        'Office / Contact',
+        'Placements',
+        'Facilities',
+        'Admission Process',
+        'Custom Question',
+      ],
+    })
+  }
+
+  if (leadStatus) {
+    await setContactCustomValue({
+      accountId,
+      userId,
+      contactId,
+      fieldName: 'Lead Status',
+      value: leadStatus,
+      fieldType: 'dropdown',
+      fieldOptions: [
+        'New Lead',
+        'Details Collected',
+        'University Selected',
+        'Courses Shared',
+        'Fees Shared',
+        'Scholarship Asked',
+        'Counselor Follow-up Needed',
+        'Hot Lead',
+        'Application Started',
+        'Admission Confirmed',
+        'Not Interested',
+        'Details Shared',
+        'University Selection Needed',
+      ],
+    })
+  }
+
+  const leadScore = calculateLeadScore({
+    selectedUniversity,
+    askedAbout,
+    leadStatus,
+    followUpRequired,
+  })
+
+  await setContactCustomValue({
+    accountId,
+    userId,
+    contactId,
+    fieldName: 'Lead Score',
+    value: leadScore,
+    fieldType: 'number',
+  })
+
+  if (askedAbout || leadStatus) {
+    await setContactCustomValue({
+      accountId,
+      userId,
+      contactId,
+      fieldName: 'Last Bot Action',
+      value: [askedAbout, leadStatus].filter(Boolean).join(' • '),
+      fieldType: 'text',
+    })
+  }
+
+  if (followUpRequired || leadStatus === 'Hot Lead' || leadStatus === 'Counselor Follow-up Needed') {
+    await setContactCustomValue({
+      accountId,
+      userId,
+      contactId,
+      fieldName: 'Follow-up Priority',
+      value: leadStatus === 'Hot Lead' ? 'High' : 'Medium',
+      fieldType: 'dropdown',
+      fieldOptions: ['Low', 'Medium', 'High'],
+    })
+  }
+
+  if (followUpRequired) {
+    const followUpDate = new Date(Date.now() + 24 * 60 * 60 * 1000)
+    await setContactCustomValue({
+      accountId,
+      userId,
+      contactId,
+      fieldName: 'Follow-up Date',
+      value: followUpDate.toISOString().slice(0, 10),
+      fieldType: 'date',
+    })
+  }
+
+  for (const tag of tags) {
+    await addContactTag({ accountId, userId, contactId, tagName: tag })
+  }
+}
+
 async function handleHybridBotFlow(params: {
   message: WhatsAppMessage
   conversationId: string
+  contactId: string
+  accountId: string
+  userId: string
   phoneNumberId: string
   accessToken: string
   senderPhone: string
@@ -449,6 +832,9 @@ async function handleHybridBotFlow(params: {
   const {
     message,
     conversationId,
+    contactId,
+    accountId,
+    userId,
     phoneNumberId,
     accessToken,
     senderPhone,
@@ -485,6 +871,15 @@ async function handleHybridBotFlow(params: {
         stage: 'waiting_for_university',
       }
 
+      await updateContactCrm({
+        accountId,
+        userId,
+        contactId,
+        askedAbout: 'Fees / Scholarship / Hostel',
+        leadStatus: 'University Selection Needed',
+        tags: ['Fees Asked'],
+      })
+
       await sendBotText(
         `Sure 😊 Please select the university for fee/scholarship/hostel details:\n\n1️⃣ Chettinad Academy of Research and Education\n2️⃣ Kalasalingam Academy of Research and Education\n\nReply with 1 or 2.`
       )
@@ -496,6 +891,16 @@ async function handleHybridBotFlow(params: {
       stage: 'waiting_for_menu_choice',
       selectedUniversity: feeUniversity,
     }
+
+    await updateContactCrm({
+      accountId,
+      userId,
+      contactId,
+      selectedUniversity: feeUniversity,
+      askedAbout: 'Fees / Scholarship / Hostel',
+      leadStatus: 'Fees Shared',
+      tags: [feeUniversity === 'kalasalingam' ? 'Kalasalingam Lead' : 'Chettinad Lead', 'Fees Asked', 'Scholarship Asked'],
+    })
 
     await sendBotText(getStaticAnswer(feeUniversity, 'fees'))
     await sendBotText(getShortMenuHint(feeUniversity))
@@ -511,6 +916,16 @@ async function handleHybridBotFlow(params: {
       selectedUniversity: mentionedUniversity,
     }
 
+    await updateContactCrm({
+      accountId,
+      userId,
+      contactId,
+      selectedUniversity: mentionedUniversity,
+      askedAbout: menuToAskedAbout(keywordMenu),
+      leadStatus: menuToLeadStatus(keywordMenu),
+      tags: buildLeadTags(mentionedUniversity, keywordMenu),
+    })
+
     await sendBotText(getStaticAnswer(mentionedUniversity, keywordMenu))
     await sendBotText(getShortMenuHint(mentionedUniversity))
     return
@@ -523,6 +938,16 @@ async function handleHybridBotFlow(params: {
       ...currentState,
       stage: 'waiting_for_menu_choice',
     }
+
+    await updateContactCrm({
+      accountId,
+      userId,
+      contactId,
+      selectedUniversity: currentState.selectedUniversity,
+      askedAbout: menuToAskedAbout(keywordMenu),
+      leadStatus: menuToLeadStatus(keywordMenu),
+      tags: buildLeadTags(currentState.selectedUniversity, keywordMenu),
+    })
 
     await sendBotText(getStaticAnswer(currentState.selectedUniversity, keywordMenu))
     await sendBotText(getShortMenuHint(currentState.selectedUniversity))
@@ -545,6 +970,16 @@ async function handleHybridBotFlow(params: {
       location: details.location,
     }
 
+    await updateContactCrm({
+      accountId,
+      userId,
+      contactId,
+      name: details.name,
+      location: details.location,
+      leadStatus: 'Details Collected',
+      tags: ['New WhatsApp Lead'],
+    })
+
     await sendBotText(getUniversitySelectionMessage(details.name))
     return
   }
@@ -563,7 +998,16 @@ async function handleHybridBotFlow(params: {
       selectedUniversity: university,
     }
 
-    await sendBotText(`Great choice 😊 ${getMenuMessage(university)}`)
+    await updateContactCrm({
+      accountId,
+      userId,
+      contactId,
+      selectedUniversity: university,
+      leadStatus: 'University Selected',
+      tags: [university === 'kalasalingam' ? 'Kalasalingam Lead' : 'Chettinad Lead'],
+    })
+
+    await sendBotText(getMenuMessage(university))
     return
   }
 
@@ -586,6 +1030,20 @@ async function handleHybridBotFlow(params: {
     }
 
     if (!requestedMenu) {
+      if (mentionedUniversity) {
+        await updateContactCrm({
+          accountId,
+          userId,
+          contactId,
+          selectedUniversity: mentionedUniversity,
+          leadStatus: 'University Selected',
+          tags: buildLeadTags(mentionedUniversity),
+        })
+
+        await sendBotText(`Sure 😊 Switched to ${UNIVERSITY_LABELS[mentionedUniversity]}.\n\n${getShortMenuHint(mentionedUniversity)}`)
+        return
+      }
+
       await sendBotText(getShortMenuHint(selectedUniversity))
       return
     }
@@ -597,9 +1055,30 @@ async function handleHybridBotFlow(params: {
         stage: 'waiting_for_custom_question',
       }
 
+      await updateContactCrm({
+        accountId,
+        userId,
+        contactId,
+        selectedUniversity,
+        askedAbout: 'Custom Question',
+        leadStatus: 'Counselor Follow-up Needed',
+        tags: buildLeadTags(selectedUniversity, 'others'),
+        followUpRequired: true,
+      })
+
       await sendBotText(getOthersPrompt(selectedUniversity))
       return
     }
+
+    await updateContactCrm({
+      accountId,
+      userId,
+      contactId,
+      selectedUniversity,
+      askedAbout: menuToAskedAbout(requestedMenu),
+      leadStatus: menuToLeadStatus(requestedMenu),
+      tags: buildLeadTags(selectedUniversity, requestedMenu),
+    })
 
     await sendBotText(getStaticAnswer(selectedUniversity, requestedMenu))
     await sendBotText(getShortMenuHint(selectedUniversity))
@@ -618,10 +1097,31 @@ async function handleHybridBotFlow(params: {
         stage: 'waiting_for_menu_choice',
       }
 
+      await updateContactCrm({
+        accountId,
+        userId,
+        contactId,
+        selectedUniversity: universityForQuestion,
+        askedAbout: menuToAskedAbout(requestedMenu),
+        leadStatus: menuToLeadStatus(requestedMenu),
+        tags: buildLeadTags(universityForQuestion, requestedMenu),
+      })
+
       await sendBotText(getStaticAnswer(universityForQuestion, requestedMenu))
       await sendBotText(getShortMenuHint(universityForQuestion))
       return
     }
+
+    await updateContactCrm({
+      accountId,
+      userId,
+      contactId,
+      selectedUniversity: universityForQuestion || currentState.selectedUniversity,
+      askedAbout: 'Custom Question',
+      leadStatus: 'Counselor Follow-up Needed',
+      tags: ['Custom Question', 'Follow-up Required'],
+      followUpRequired: true,
+    })
 
     const aiReply = await getAIReply(inboundText, senderPhone, {
       selectedUniversity: universityForQuestion ? UNIVERSITY_LABELS[universityForQuestion] : undefined,
@@ -1047,6 +1547,9 @@ async function processMessage(
     handleHybridBotFlow({
       message,
       conversationId: conversation.id,
+      contactId: contactRecord.id,
+      accountId,
+      userId: configOwnerUserId,
       phoneNumberId,
       accessToken,
       senderPhone,
