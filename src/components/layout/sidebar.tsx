@@ -14,7 +14,9 @@ import {
   GraduationCap,
   LayoutDashboard,
   LogOut,
+  Mail,
   MessageSquare,
+  Phone,
   Radio,
   Settings,
   Shield,
@@ -83,6 +85,9 @@ const navItems: NavItem[] = [
   { href: "/broadcasts", label: "Campaigns", icon: Radio },
   { href: "/automations", label: "Follow-up Rules", icon: Zap },
   { href: "/flows", label: "Bot Flows", icon: Workflow, beta: true },
+  { href: "/bulk-whatsapp", label: "Bulk WhatsApp", icon: Radio },
+  { href: "/gmail-campaign", label: "Gmail Campaign", icon: Mail },
+  { href: "/call-manager", label: "Call Manager", icon: Phone },
 ]
 
 const bottomNavItems = [{ href: "/settings", label: "Settings", icon: Settings }]
