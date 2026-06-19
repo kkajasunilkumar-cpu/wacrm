@@ -8,7 +8,7 @@ interface EmailSettings { from: string; appPassword: string; }
 interface CampaignLog { email: string; name: string; status: 'sent' | 'failed'; reason?: string; time: string; }
 interface ScheduleOption { value: string; label: string; }
 
-const MAILER_URL = process.env.NEXT_PUBLIC_MAILER_URL || 'http://localhost:3002';
+const MAILER_URL = '/api/mailer';
 
 export default function GmailCampaignPage() {
   const [settings, setSettings] = useState<EmailSettings>({ from: '', appPassword: '' });
