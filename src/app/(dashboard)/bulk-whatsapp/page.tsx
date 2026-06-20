@@ -10,6 +10,7 @@ interface ConnectionStatus { status: 'connected' | 'connecting' | 'disconnected'
 
 const NGROK_HEADERS = { 'ngrok-skip-browser-warning': 'true' };
 const URL_STORAGE_KEY = 'baileys_service_url';
+const PREV_CAMPAIGN_KEY = 'prev_campaign_result';
 
 export default function BulkWhatsAppPage() {
   const [serviceUrl, setServiceUrl] = useState('');
@@ -24,6 +25,8 @@ export default function BulkWhatsAppPage() {
   const [delayMin, setDelayMin] = useState(5);
   const [delayMax, setDelayMax] = useState(15);
   const [campaign, setCampaign] = useState<CampaignStatus>({ running: false, total: 0, sent: 0, failed: 0, pending: 0, log: [], startedAt: null, aborted: false });
+  const [prevCampaign, setPrevCampaign] = useState<CampaignStatus | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [serviceError, setServiceError] = useState(false);
@@ -36,6 +39,9 @@ export default function BulkWhatsAppPage() {
     const saved = localStorage.getItem(URL_STORAGE_KEY);
     if (saved) { setServiceUrl(saved); setServiceUrlInput(saved); setUrlSaved(true); }
     else { setShowUrlSettings(true); }
+    // Load previous campaign from localStorage
+    const prev = localStorage.getItem(PREV_CAMPAIGN_KEY);
+    if (prev) setPrevCampaign(JSON.parse(prev));
   }, []);
 
   const saveServiceUrl = () => {
@@ -55,7 +61,7 @@ export default function BulkWhatsAppPage() {
     setConnection({ status: 'disconnected', hasQR: false }); setQrImage(null);
   };
 
-  // Polling function
+  // Polling
   const startPolling = (url: string) => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
@@ -63,7 +69,14 @@ export default function BulkWhatsAppPage() {
         const res = await fetch(`${url}/campaign-status`, { headers: NGROK_HEADERS });
         const data: CampaignStatus = await res.json();
         setCampaign(data);
-        if (!data.running && pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+        setIsStarting(false);
+        // When campaign completes, save as previous
+        if (!data.running && data.total > 0) {
+          localStorage.setItem(PREV_CAMPAIGN_KEY, JSON.stringify(data));
+          setPrevCampaign(data);
+          clearInterval(pollRef.current!);
+          pollRef.current = null;
+        }
       } catch {}
     }, 2000);
   };
@@ -88,22 +101,23 @@ export default function BulkWhatsAppPage() {
     }
   }, []);
 
-  // Auto-load campaign status + start connection polling when URL is set
+  // Auto-load campaign + start polling when URL set
   useEffect(() => {
     if (!serviceUrl) return;
-
-    // Load campaign status immediately
     const loadCampaign = async () => {
       try {
         const res = await fetch(`${serviceUrl}/campaign-status`, { headers: NGROK_HEADERS });
         const data: CampaignStatus = await res.json();
         setCampaign(data);
         if (data.running) startPolling(serviceUrl);
+        // Save completed campaign as previous
+        if (!data.running && data.total > 0) {
+          localStorage.setItem(PREV_CAMPAIGN_KEY, JSON.stringify(data));
+          setPrevCampaign(data);
+        }
       } catch {}
     };
     loadCampaign();
-
-    // Check connection status every 5 seconds
     checkStatus(serviceUrl);
     const interval = setInterval(() => checkStatus(serviceUrl), 5000);
     return () => { clearInterval(interval); if (pollRef.current) clearInterval(pollRef.current); };
@@ -161,6 +175,7 @@ export default function BulkWhatsAppPage() {
     if (!contacts.length) { alert('Please import contacts.'); return; }
     if (connection.status !== 'connected') { alert('WhatsApp not connected. Scan QR first.'); return; }
     if (!confirm(`Start sending to ${contacts.length} contacts?`)) return;
+    setIsStarting(true);
     try {
       const res = await fetch(`${serviceUrl}/bulk-send`, {
         method: 'POST',
@@ -168,9 +183,9 @@ export default function BulkWhatsAppPage() {
         body: JSON.stringify({ contacts, message, delayMin: delayMin * 1000, delayMax: delayMax * 1000 }),
       });
       const data = await res.json();
-      if (data.error) { alert(data.error); return; }
+      if (data.error) { alert(data.error); setIsStarting(false); return; }
       startPolling(serviceUrl);
-    } catch { alert('Cannot reach service. Check ngrok URL.'); }
+    } catch { alert('Cannot reach service. Check ngrok URL.'); setIsStarting(false); }
   };
 
   const abortCampaign = async () => {
@@ -178,6 +193,7 @@ export default function BulkWhatsAppPage() {
     await fetch(`${serviceUrl}/abort`, { method: 'POST', headers: NGROK_HEADERS });
   };
 
+  const isRunning = campaign.running || isStarting;
   const pct = campaign.total > 0 ? Math.round(((campaign.sent + campaign.failed) / campaign.total) * 100) : 0;
   const statusColor = connection.status === 'connected' ? 'bg-emerald-500' : connection.status === 'connecting' ? 'bg-amber-400 animate-pulse' : 'bg-red-500';
   const defaultVars = ['name', 'mobile', 'phone', 'course', 'city', 'email'];
@@ -201,18 +217,16 @@ export default function BulkWhatsAppPage() {
         </button>
       </div>
 
-      {/* URL Settings Panel */}
+      {/* URL Settings */}
       {showUrlSettings && (
         <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-5">
           <p className="text-sm font-bold text-white mb-1">🔗 WhatsApp Service URL</p>
-          <p className="text-xs text-zinc-400 mb-4">Paste the ngrok URL from your laptop. No GitHub update needed — just paste and save!</p>
+          <p className="text-xs text-zinc-400 mb-4">Paste the ngrok URL from your laptop. No GitHub update needed!</p>
           <div className="flex gap-3">
             <input type="text" value={serviceUrlInput} onChange={(e) => setServiceUrlInput(e.target.value)}
               placeholder="https://xxxx.ngrok-free.app"
               className="flex-1 rounded-lg border border-zinc-700 bg-zinc-950 text-white text-sm px-4 py-2.5 focus:outline-none focus:border-emerald-500 font-mono" />
-            <button onClick={saveServiceUrl} className="px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-bold transition-colors whitespace-nowrap">
-              💾 Save URL
-            </button>
+            <button onClick={saveServiceUrl} className="px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-bold transition-colors whitespace-nowrap">💾 Save URL</button>
             {urlSaved && <button onClick={clearServiceUrl} className="px-4 py-2.5 rounded-lg border border-zinc-700 text-zinc-400 text-sm hover:border-red-500 hover:text-red-400 transition-colors">✕</button>}
           </div>
           {urlSaved && <div className="mt-3 flex items-center gap-2 text-xs text-emerald-400"><span className="w-2 h-2 rounded-full bg-emerald-400"></span>Current: <span className="font-mono">{serviceUrl}</span></div>}
@@ -221,14 +235,14 @@ export default function BulkWhatsAppPage() {
 
       {!serviceUrl && !showUrlSettings && (
         <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400 flex items-center justify-between">
-          <span>⚠️ No service URL set. Click "Set URL" to add your ngrok URL.</span>
+          <span>⚠️ No service URL set.</span>
           <button onClick={() => setShowUrlSettings(true)} className="text-xs font-bold underline">Set Now</button>
         </div>
       )}
 
       {serviceError && serviceUrl && (
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400 flex items-center justify-between">
-          <span>❌ Cannot reach service. Check that node index.js and ngrok are running.</span>
+          <span>❌ Cannot reach service. Check node index.js and ngrok are running.</span>
           <button onClick={() => setShowUrlSettings(true)} className="text-xs font-bold underline ml-4 whitespace-nowrap">Update URL</button>
         </div>
       )}
@@ -254,16 +268,14 @@ export default function BulkWhatsAppPage() {
                 </p>
               </div>
             </div>
-
             <div className="rounded-xl bg-white flex items-center justify-center min-h-[200px] mb-4 p-4">
               {qrImage ? <img src={qrImage} alt="WhatsApp QR" className="w-44 h-44" />
                 : connection.status === 'connected' ? (
                   <div className="text-center text-zinc-400 text-sm"><div className="text-4xl mb-2">✅</div><div className="text-emerald-600 font-semibold">Connected!</div></div>
                 ) : (
-                  <div className="text-center text-zinc-400 text-sm"><div className="text-4xl mb-2">📷</div><div>QR will appear here</div><div className="text-xs mt-1">{serviceUrl ? 'Click Refresh Status' : 'Set ngrok URL first'}</div></div>
+                  <div className="text-center text-zinc-400 text-sm"><div className="text-4xl mb-2">📷</div><div>QR will appear here</div></div>
                 )}
             </div>
-
             <button onClick={() => checkStatus(serviceUrl)} disabled={!serviceUrl}
               className="w-full rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-white text-sm font-semibold py-2.5 transition-colors mb-2">
               🔄 Refresh Status
@@ -288,7 +300,6 @@ export default function BulkWhatsAppPage() {
               <p className="text-sm font-semibold text-white mb-1">Drop CSV or Excel here</p>
               <p className="text-xs text-zinc-500">Required: <span className="text-emerald-400">phone</span> or <span className="text-emerald-400">mobile</span> column</p>
             </div>
-
             {contacts.length > 0 && (
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -303,7 +314,6 @@ export default function BulkWhatsAppPage() {
                 </div>
               </div>
             )}
-
             <div className="grid grid-cols-2 gap-3 mt-4">
               <div>
                 <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider block mb-1.5">Min Delay (sec)</label>
@@ -351,15 +361,39 @@ export default function BulkWhatsAppPage() {
                 {preview}
               </div>
             )}
-            <button onClick={startCampaign} disabled={campaign.running || !serviceUrl}
+            <button onClick={startCampaign} disabled={isRunning || !serviceUrl}
               className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold py-3 text-sm transition-opacity">
-              🚀 {campaign.running ? 'Campaign Running...' : 'Start Bulk Campaign'}
+              🚀 {isStarting ? 'Starting...' : campaign.running ? 'Campaign Running...' : 'Start Bulk Campaign'}
             </button>
           </div>
 
-          {/* Progress */}
+          {/* Previous Campaign */}
+          {prevCampaign && !campaign.running && !isStarting && (
+            <div className="rounded-2xl border border-zinc-700 bg-zinc-900 p-5">
+              <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">📋 Previous Campaign Results</p>
+              <div className="grid grid-cols-3 gap-3 mb-3">
+                {[{ label: 'Sent', value: prevCampaign.sent, color: 'text-emerald-400' }, { label: 'Failed', value: prevCampaign.failed, color: 'text-red-400' }, { label: 'Total', value: prevCampaign.total, color: 'text-zinc-300' }].map(({ label, value, color }) => (
+                  <div key={label} className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 text-center">
+                    <div className={`text-2xl font-bold ${color}`}>{value}</div>
+                    <div className="text-xs text-zinc-500 mt-0.5 uppercase tracking-wider">{label}</div>
+                  </div>
+                ))}
+              </div>
+              {prevCampaign.startedAt && (
+                <p className="text-xs text-zinc-600">Sent on: {new Date(prevCampaign.startedAt).toLocaleString()}</p>
+              )}
+            </div>
+          )}
+
+          {/* Current Campaign Progress */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
-            <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">📊 Campaign Progress</p>
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">📊 Current Campaign</p>
+              {isStarting && <span className="text-xs text-amber-400 animate-pulse font-semibold">⏳ Starting...</span>}
+              {campaign.running && <span className="text-xs text-emerald-400 animate-pulse font-semibold">🔴 Live</span>}
+              {!campaign.running && campaign.total > 0 && !isStarting && <span className="text-xs text-zinc-500 font-semibold">✅ Complete</span>}
+            </div>
+
             <div className="grid grid-cols-3 gap-3 mb-4">
               {[{ label: 'Sent', value: campaign.sent, color: 'text-emerald-400' }, { label: 'Failed', value: campaign.failed, color: 'text-red-400' }, { label: 'Pending', value: campaign.pending, color: 'text-amber-400' }].map(({ label, value, color }) => (
                 <div key={label} className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-center">
@@ -368,22 +402,33 @@ export default function BulkWhatsAppPage() {
                 </div>
               ))}
             </div>
+
             <div className="h-2 rounded-full bg-zinc-800 overflow-hidden mb-2">
-              <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-500 transition-all duration-500" style={{ width: `${pct}%` }} />
+              <div className={`h-full rounded-full transition-all duration-500 ${campaign.running ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-emerald-600 to-teal-600'}`}
+                style={{ width: `${isStarting ? 2 : pct}%` }} />
             </div>
             <div className="flex justify-between text-xs text-zinc-500 mb-4">
-              <span>{campaign.running ? `Sending... (${campaign.sent + campaign.failed}/${campaign.total})` : campaign.total > 0 ? `Campaign complete — ${campaign.sent} sent, ${campaign.failed} failed` : 'No campaign running'}</span>
-              <span>{pct}%</span>
+              <span>
+                {isStarting ? '⏳ Preparing to send...'
+                  : campaign.running ? `🔴 Sending... (${campaign.sent + campaign.failed}/${campaign.total})`
+                  : campaign.total > 0 ? `✅ Complete — ${campaign.sent} sent, ${campaign.failed} failed`
+                  : 'No campaign running'}
+              </span>
+              <span>{isStarting ? '' : `${pct}%`}</span>
             </div>
+
             {campaign.running && (
               <button onClick={abortCampaign} className="w-full rounded-xl border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-semibold py-2.5 text-sm transition-colors mb-4">
                 ⛔ Abort Campaign
               </button>
             )}
+
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">📋 Send Log</p>
             <div className="rounded-xl border border-zinc-800 bg-zinc-950 max-h-64 overflow-y-auto">
               {campaign.log.length === 0 ? (
-                <div className="text-center py-8 text-zinc-600 text-sm">No messages sent yet</div>
+                <div className="text-center py-8 text-zinc-600 text-sm">
+                  {isStarting ? '⏳ Waiting for first message...' : 'No messages sent yet'}
+                </div>
               ) : (
                 [...campaign.log].reverse().map((entry, i) => (
                   <div key={i} className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 last:border-0">
