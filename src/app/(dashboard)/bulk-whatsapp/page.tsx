@@ -34,7 +34,7 @@ interface ConnectionStatus {
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const BAILEYS_URL = 'https://baileys-service-production-802b.up.railway.app';
+const BAILEYS_URL = 'https://scion-catatonic-customize.ngrok-free.dev';
 
 // ── Main  Component ─────────────────────────────────────────────────────────
 export default function BulkWhatsAppPage() {
