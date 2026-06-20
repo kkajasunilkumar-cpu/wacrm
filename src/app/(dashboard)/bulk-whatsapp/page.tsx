@@ -3,7 +3,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 
-// ── Types ──────────────────────────────────────────────────────────────────
 interface Contact {
   [key: string]: string;
 }
@@ -33,10 +32,9 @@ interface ConnectionStatus {
   phone?: { name: string; id: string };
 }
 
-// ── Config ─────────────────────────────────────────────────────────────────
 const BAILEYS_URL = 'https://scion-catatonic-customize.ngrok-free.dev';
+const NGROK_HEADERS = { 'ngrok-skip-browser-warning': 'true' };
 
-// ── Main  Component ─────────────────────────────────────────────────────────
 export default function BulkWhatsAppPage() {
   const [connection, setConnection] = useState<ConnectionStatus>({ status: 'disconnected', hasQR: false });
   const [qrImage, setQrImage] = useState<string | null>(null);
@@ -53,10 +51,9 @@ export default function BulkWhatsAppPage() {
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // ── Connection polling ───────────────────────────────────────────────────
   const checkStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${BAILEYS_URL}/status`);
+      const res = await fetch(`${BAILEYS_URL}/status`, { headers: NGROK_HEADERS });
       const data: ConnectionStatus = await res.json();
       setConnection(data);
       setServiceError(false);
@@ -70,16 +67,16 @@ export default function BulkWhatsAppPage() {
 
   const loadQR = async () => {
     try {
-      const res = await fetch(`${BAILEYS_URL}/qr`);
+      const res = await fetch(`${BAILEYS_URL}/qr`, { headers: NGROK_HEADERS });
       const data = await res.json();
       if (data.qr) setQrImage(data.qr);
     } catch {}
   };
 
   const disconnect = async () => {
-    if (!confirm('This will log out the temporary number and clear the session. Continue?')) return;
+    if (!confirm('This will log out the temporary number. Continue?')) return;
     try {
-      await fetch(`${BAILEYS_URL}/disconnect`, { method: 'POST' });
+      await fetch(`${BAILEYS_URL}/disconnect`, { method: 'POST', headers: NGROK_HEADERS });
       setQrImage(null);
       setTimeout(checkStatus, 2000);
     } catch {}
@@ -87,11 +84,10 @@ export default function BulkWhatsAppPage() {
 
   useEffect(() => {
     checkStatus();
-    const interval = setInterval(checkStatus, 10000);
+    const interval = setInterval(checkStatus, 5000);
     return () => clearInterval(interval);
   }, [checkStatus]);
 
-  // ── File import ──────────────────────────────────────────────────────────
   const parseCSV = (text: string) => {
     const lines = text.trim().split('\n');
     const hdrs = lines[0].split(',').map((h) => h.trim().replace(/"/g, '').toLowerCase());
@@ -126,23 +122,15 @@ export default function BulkWhatsAppPage() {
 
   const handleFile = (file: File) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
-    if (ext === 'csv') {
-      const reader = new FileReader();
-      reader.onload = (e) => parseCSV(e.target?.result as string);
-      reader.readAsText(file);
-    } else if (ext === 'xlsx' || ext === 'xls') {
-      const reader = new FileReader();
-      reader.onload = (e) => parseExcel(e.target?.result as ArrayBuffer);
-      reader.readAsArrayBuffer(file);
-    }
+    if (ext === 'csv') { const r = new FileReader(); r.onload = (e) => parseCSV(e.target?.result as string); r.readAsText(file); }
+    else if (ext === 'xlsx' || ext === 'xls') { const r = new FileReader(); r.onload = (e) => parseExcel(e.target?.result as ArrayBuffer); r.readAsArrayBuffer(file); }
   };
 
   const insertVar = (v: string) => {
     const ta = textareaRef.current;
     if (!ta) return;
     const start = ta.selectionStart;
-    const end = ta.selectionEnd;
-    const newVal = message.slice(0, start) + v + message.slice(end);
+    const newVal = message.slice(0, start) + v + message.slice(ta.selectionEnd);
     setMessage(newVal);
     setTimeout(() => { ta.selectionStart = ta.selectionEnd = start + v.length; ta.focus(); }, 0);
   };
@@ -154,7 +142,6 @@ export default function BulkWhatsAppPage() {
     setPreview(p);
   };
 
-  // ── Campaign ─────────────────────────────────────────────────────────────
   const startCampaign = async () => {
     if (!message.trim()) { alert('Please write a message.'); return; }
     if (!contacts.length) { alert('Please import contacts.'); return; }
@@ -164,25 +151,25 @@ export default function BulkWhatsAppPage() {
     try {
       const res = await fetch(`${BAILEYS_URL}/bulk-send`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...NGROK_HEADERS },
         body: JSON.stringify({ contacts, message, delayMin: delayMin * 1000, delayMax: delayMax * 1000 }),
       });
       const data = await res.json();
       if (data.error) { alert(data.error); return; }
       startPolling();
-    } catch { alert('Cannot reach Baileys service.'); }
+    } catch { alert('Cannot reach service.'); }
   };
 
   const abortCampaign = async () => {
     if (!confirm('Abort campaign?')) return;
-    await fetch(`${BAILEYS_URL}/abort`, { method: 'POST' });
+    await fetch(`${BAILEYS_URL}/abort`, { method: 'POST', headers: NGROK_HEADERS });
   };
 
   const startPolling = () => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`${BAILEYS_URL}/campaign-status`);
+        const res = await fetch(`${BAILEYS_URL}/campaign-status`, { headers: NGROK_HEADERS });
         const data: CampaignStatus = await res.json();
         setCampaign(data);
         if (!data.running && pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -200,8 +187,6 @@ export default function BulkWhatsAppPage() {
 
   return (
     <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
-
-      {/* Header */}
       <div className="flex items-center gap-3">
         <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-xl">📢</div>
         <div>
@@ -210,22 +195,16 @@ export default function BulkWhatsAppPage() {
         </div>
       </div>
 
-      {/* Service warning */}
       {serviceError && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400 flex items-center gap-2">
-          ⚠️ Baileys service not reachable. Run <code className="bg-zinc-800 px-2 py-0.5 rounded text-xs">pm2 start baileys-service</code> on your server.
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400">
+          ⚠️ Service not reachable. Make sure <code className="bg-zinc-800 px-2 py-0.5 rounded text-xs">node index.js</code> and <code className="bg-zinc-800 px-2 py-0.5 rounded text-xs">ngrok</code> are running on your laptop.
         </div>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-6 items-start">
-
-        {/* LEFT — Connection + Contacts */}
         <div className="flex flex-col gap-5">
-
-          {/* Connection Card */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">📱 Temporary Number</p>
-
             <div className="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 mb-4">
               <span className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${statusColor}`} />
               <div>
@@ -234,15 +213,14 @@ export default function BulkWhatsAppPage() {
                 </p>
                 <p className="text-xs text-zinc-500">
                   {connection.status === 'connected' && connection.phone
-                    ? `${connection.phone.name} · ${connection.phone.id.split(':')[0]}`
+                    ? `${connection.phone.name}`
                     : connection.status === 'connecting'
                     ? 'Open WhatsApp → Linked Devices → Scan'
-                    : 'Start Baileys service on server'}
+                    : 'Start node index.js and ngrok on laptop'}
                 </p>
               </div>
             </div>
 
-            {/* QR Box */}
             <div className="rounded-xl bg-white flex items-center justify-center min-h-[200px] mb-4 p-4">
               {qrImage ? (
                 <img src={qrImage} alt="WhatsApp QR" className="w-44 h-44" />
@@ -250,13 +228,12 @@ export default function BulkWhatsAppPage() {
                 <div className="text-center text-zinc-400 text-sm">
                   <div className="text-4xl mb-2">✅</div>
                   <div className="text-emerald-600 font-semibold">Connected!</div>
-                  <div className="text-xs mt-1 text-zinc-500">Ready to send bulk messages</div>
                 </div>
               ) : (
                 <div className="text-center text-zinc-400 text-sm">
                   <div className="text-4xl mb-2">📷</div>
                   <div>QR will appear here</div>
-                  <div className="text-xs mt-1">Waiting for Baileys service...</div>
+                  <div className="text-xs mt-1">Click Refresh Status</div>
                 </div>
               )}
             </div>
@@ -271,11 +248,8 @@ export default function BulkWhatsAppPage() {
             )}
           </div>
 
-          {/* Contacts Card */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">👥 Import Contacts</p>
-
-            {/* Upload Zone */}
             <div
               className={`relative border-2 border-dashed rounded-xl p-6 text-center cursor-pointer transition-colors mb-4 ${isDragging ? 'border-emerald-500 bg-emerald-500/10' : 'border-zinc-700 hover:border-zinc-500'}`}
               onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
@@ -286,7 +260,7 @@ export default function BulkWhatsAppPage() {
               <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
               <div className="text-3xl mb-2">📂</div>
               <p className="text-sm font-semibold text-white mb-1">Drop CSV or Excel here</p>
-              <p className="text-xs text-zinc-500">Required column: <span className="text-emerald-400">phone</span> or <span className="text-emerald-400">mobile</span></p>
+              <p className="text-xs text-zinc-500">Required: <span className="text-emerald-400">phone</span> or <span className="text-emerald-400">mobile</span> column</p>
             </div>
 
             {contacts.length > 0 && (
@@ -297,25 +271,19 @@ export default function BulkWhatsAppPage() {
                 </div>
                 <div className="rounded-lg border border-zinc-800 overflow-hidden max-h-48 overflow-y-auto">
                   <table className="w-full text-xs">
-                    <thead>
-                      <tr className="bg-zinc-800">
-                        {headers.slice(0, 3).map((h) => <th key={h} className="px-3 py-2 text-left text-zinc-400 font-semibold uppercase">{h}</th>)}
-                      </tr>
-                    </thead>
+                    <thead><tr className="bg-zinc-800">{headers.slice(0, 3).map((h) => <th key={h} className="px-3 py-2 text-left text-zinc-400 font-semibold uppercase">{h}</th>)}</tr></thead>
                     <tbody>
                       {contacts.slice(0, 30).map((c, i) => (
                         <tr key={i} className="border-t border-zinc-800">
                           {headers.slice(0, 3).map((h) => <td key={h} className="px-3 py-2 text-zinc-300">{c[h]}</td>)}
                         </tr>
                       ))}
-                      {contacts.length > 30 && <tr><td colSpan={3} className="px-3 py-2 text-zinc-500 text-center">...and {contacts.length - 30} more</td></tr>}
                     </tbody>
                   </table>
                 </div>
               </div>
             )}
 
-            {/* Delay */}
             <div className="grid grid-cols-2 gap-3 mt-4">
               <div>
                 <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider block mb-1.5">Min Delay (sec)</label>
@@ -331,14 +299,9 @@ export default function BulkWhatsAppPage() {
           </div>
         </div>
 
-        {/* RIGHT — Composer + Progress */}
         <div className="flex flex-col gap-5">
-
-          {/* Message Composer */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">✍️ Message Composer</p>
-
-            {/* Variable chips */}
             <p className="text-xs text-zinc-500 mb-2">Click to insert variable:</p>
             <div className="flex flex-wrap gap-2 mb-4">
               {allVars.map((v) => (
@@ -355,12 +318,12 @@ export default function BulkWhatsAppPage() {
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               rows={8}
-              placeholder={`Hi {name} 👋\n\nWe noticed your interest in {course}.\n\nKBEduTech is offering special admissions for 2024-25 batch!\n✅ Expert faculty\n✅ Proven track record\n\nReply to know more!\n\n— KBEduTech Team`}
+              placeholder={`Hi {name} 👋\n\nWe noticed your interest in {course}.\n\nKBEduTech special admissions 2024-25!\n✅ Expert faculty\n✅ Proven track record\n\nReply to know more!\n\n— KBEduTech Team`}
               className="w-full rounded-xl border border-zinc-700 bg-zinc-950 text-white text-sm px-4 py-3 focus:outline-none focus:border-emerald-500 resize-none mb-3"
             />
             <div className="flex items-center justify-between mb-5">
               <span className="text-xs text-zinc-500">{message.length} characters</span>
-              <button onClick={showPreview} className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold transition-colors">👁️ Preview with first contact</button>
+              <button onClick={showPreview} className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold transition-colors">👁️ Preview</button>
             </div>
 
             {preview && (
@@ -379,16 +342,10 @@ export default function BulkWhatsAppPage() {
             </button>
           </div>
 
-          {/* Progress */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">📊 Campaign Progress</p>
-
             <div className="grid grid-cols-3 gap-3 mb-4">
-              {[
-                { label: 'Sent', value: campaign.sent, color: 'text-emerald-400' },
-                { label: 'Failed', value: campaign.failed, color: 'text-red-400' },
-                { label: 'Pending', value: campaign.pending, color: 'text-amber-400' },
-              ].map(({ label, value, color }) => (
+              {[{ label: 'Sent', value: campaign.sent, color: 'text-emerald-400' }, { label: 'Failed', value: campaign.failed, color: 'text-red-400' }, { label: 'Pending', value: campaign.pending, color: 'text-amber-400' }].map(({ label, value, color }) => (
                 <div key={label} className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-center">
                   <div className={`text-3xl font-bold ${color}`}>{value}</div>
                   <div className="text-xs text-zinc-500 mt-1 uppercase tracking-wider">{label}</div>
@@ -410,7 +367,6 @@ export default function BulkWhatsAppPage() {
               </button>
             )}
 
-            {/* Log */}
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">📋 Send Log</p>
             <div className="rounded-xl border border-zinc-800 bg-zinc-950 max-h-64 overflow-y-auto">
               {campaign.log.length === 0 ? (
