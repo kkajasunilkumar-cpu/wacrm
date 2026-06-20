@@ -32,10 +32,16 @@ interface ConnectionStatus {
   phone?: { name: string; id: string };
 }
 
-const BAILEYS_URL = 'https://scion-catatonic-customize.ngrok-free.dev';
 const NGROK_HEADERS = { 'ngrok-skip-browser-warning': 'true' };
+const URL_STORAGE_KEY = 'baileys_service_url';
+const DEFAULT_URL = '';
 
 export default function BulkWhatsAppPage() {
+  const [serviceUrl, setServiceUrl] = useState<string>(DEFAULT_URL);
+  const [serviceUrlInput, setServiceUrlInput] = useState<string>(DEFAULT_URL);
+  const [urlSaved, setUrlSaved] = useState(false);
+  const [showUrlSettings, setShowUrlSettings] = useState(false);
+
   const [connection, setConnection] = useState<ConnectionStatus>({ status: 'disconnected', hasQR: false });
   const [qrImage, setQrImage] = useState<string | null>(null);
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -47,13 +53,49 @@ export default function BulkWhatsAppPage() {
   const [preview, setPreview] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [serviceError, setServiceError] = useState(false);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Load saved URL from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(URL_STORAGE_KEY);
+    if (saved) {
+      setServiceUrl(saved);
+      setServiceUrlInput(saved);
+      setUrlSaved(true);
+    } else {
+      setShowUrlSettings(true); // Show settings if no URL saved
+    }
+  }, []);
+
+  const saveServiceUrl = () => {
+    const url = serviceUrlInput.trim().replace(/\/$/, ''); // Remove trailing slash
+    if (!url) { alert('Please enter the ngrok URL.'); return; }
+    if (!url.startsWith('http')) { alert('URL must start with http:// or https://'); return; }
+    localStorage.setItem(URL_STORAGE_KEY, url);
+    setServiceUrl(url);
+    setUrlSaved(true);
+    setShowUrlSettings(false);
+    alert('Service URL saved! Click Refresh Status to connect.');
+  };
+
+  const clearServiceUrl = () => {
+    localStorage.removeItem(URL_STORAGE_KEY);
+    setServiceUrl('');
+    setServiceUrlInput('');
+    setUrlSaved(false);
+    setShowUrlSettings(true);
+    setConnection({ status: 'disconnected', hasQR: false });
+    setQrImage(null);
+  };
+
+  // ── Connection ─────────────────────────────────────────────────────────────
   const checkStatus = useCallback(async () => {
+    if (!serviceUrl) return;
     try {
-      const res = await fetch(`${BAILEYS_URL}/status`, { headers: NGROK_HEADERS });
+      const res = await fetch(`${serviceUrl}/status`, { headers: NGROK_HEADERS });
       const data: ConnectionStatus = await res.json();
       setConnection(data);
       setServiceError(false);
@@ -63,11 +105,12 @@ export default function BulkWhatsAppPage() {
       setServiceError(true);
       setConnection({ status: 'disconnected', hasQR: false });
     }
-  }, []);
+  }, [serviceUrl]);
 
   const loadQR = async () => {
+    if (!serviceUrl) return;
     try {
-      const res = await fetch(`${BAILEYS_URL}/qr`, { headers: NGROK_HEADERS });
+      const res = await fetch(`${serviceUrl}/qr`, { headers: NGROK_HEADERS });
       const data = await res.json();
       if (data.qr) setQrImage(data.qr);
     } catch {}
@@ -76,18 +119,20 @@ export default function BulkWhatsAppPage() {
   const disconnect = async () => {
     if (!confirm('This will log out the temporary number. Continue?')) return;
     try {
-      await fetch(`${BAILEYS_URL}/disconnect`, { method: 'POST', headers: NGROK_HEADERS });
+      await fetch(`${serviceUrl}/disconnect`, { method: 'POST', headers: NGROK_HEADERS });
       setQrImage(null);
       setTimeout(checkStatus, 2000);
     } catch {}
   };
 
   useEffect(() => {
+    if (!serviceUrl) return;
     checkStatus();
     const interval = setInterval(checkStatus, 5000);
     return () => clearInterval(interval);
-  }, [checkStatus]);
+  }, [checkStatus, serviceUrl]);
 
+  // ── File Import ────────────────────────────────────────────────────────────
   const parseCSV = (text: string) => {
     const lines = text.trim().split('\n');
     const hdrs = lines[0].split(',').map((h) => h.trim().replace(/"/g, '').toLowerCase());
@@ -115,10 +160,7 @@ export default function BulkWhatsAppPage() {
     loadContacts(normalised, hdrs);
   };
 
-  const loadContacts = (rows: Contact[], hdrs: string[]) => {
-    setContacts(rows);
-    setHeaders(hdrs);
-  };
+  const loadContacts = (rows: Contact[], hdrs: string[]) => { setContacts(rows); setHeaders(hdrs); };
 
   const handleFile = (file: File) => {
     const ext = file.name.split('.').pop()?.toLowerCase();
@@ -142,14 +184,16 @@ export default function BulkWhatsAppPage() {
     setPreview(p);
   };
 
+  // ── Campaign ───────────────────────────────────────────────────────────────
   const startCampaign = async () => {
+    if (!serviceUrl) { alert('Please save the service URL first.'); return; }
     if (!message.trim()) { alert('Please write a message.'); return; }
     if (!contacts.length) { alert('Please import contacts.'); return; }
     if (connection.status !== 'connected') { alert('WhatsApp not connected. Scan QR first.'); return; }
     if (!confirm(`Start sending to ${contacts.length} contacts?`)) return;
 
     try {
-      const res = await fetch(`${BAILEYS_URL}/bulk-send`, {
+      const res = await fetch(`${serviceUrl}/bulk-send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...NGROK_HEADERS },
         body: JSON.stringify({ contacts, message, delayMin: delayMin * 1000, delayMax: delayMax * 1000 }),
@@ -157,19 +201,19 @@ export default function BulkWhatsAppPage() {
       const data = await res.json();
       if (data.error) { alert(data.error); return; }
       startPolling();
-    } catch { alert('Cannot reach service.'); }
+    } catch { alert('Cannot reach service. Check ngrok URL.'); }
   };
 
   const abortCampaign = async () => {
     if (!confirm('Abort campaign?')) return;
-    await fetch(`${BAILEYS_URL}/abort`, { method: 'POST', headers: NGROK_HEADERS });
+    await fetch(`${serviceUrl}/abort`, { method: 'POST', headers: NGROK_HEADERS });
   };
 
   const startPolling = () => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       try {
-        const res = await fetch(`${BAILEYS_URL}/campaign-status`, { headers: NGROK_HEADERS });
+        const res = await fetch(`${serviceUrl}/campaign-status`, { headers: NGROK_HEADERS });
         const data: CampaignStatus = await res.json();
         setCampaign(data);
         if (!data.running && pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -181,28 +225,86 @@ export default function BulkWhatsAppPage() {
 
   const pct = campaign.total > 0 ? Math.round(((campaign.sent + campaign.failed) / campaign.total) * 100) : 0;
   const statusColor = connection.status === 'connected' ? 'bg-emerald-500' : connection.status === 'connecting' ? 'bg-amber-400 animate-pulse' : 'bg-red-500';
-  const defaultVars = ['name', 'phone', 'course', 'city', 'email'];
+  const defaultVars = ['name', 'phone', 'course', 'city', 'email', 'mobile'];
   const extraVars = headers.filter((h) => !defaultVars.includes(h));
-  const allVars = [...defaultVars, ...extraVars];
+  const allVars = [...new Set([...headers.filter(h => ['name','mobile','phone','course','city','email'].includes(h)), ...extraVars])];
 
   return (
     <div className="flex flex-col gap-6 p-6 max-w-7xl mx-auto">
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-xl">📢</div>
-        <div>
-          <h1 className="text-xl font-bold text-white">Bulk WhatsApp</h1>
-          <p className="text-sm text-zinc-400">Send messages via temporary number — separate from your official Meta number</p>
+
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-xl">📢</div>
+          <div>
+            <h1 className="text-xl font-bold text-white">Bulk WhatsApp</h1>
+            <p className="text-sm text-zinc-400">Send messages via temporary number — separate from your official Meta number</p>
+          </div>
         </div>
+        <button onClick={() => setShowUrlSettings(!showUrlSettings)}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-400 text-sm hover:border-emerald-500 hover:text-emerald-400 transition-colors">
+          ⚙️ {urlSaved ? 'Change URL' : 'Set URL'}
+        </button>
       </div>
 
-      {serviceError && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400">
-          ⚠️ Service not reachable. Make sure <code className="bg-zinc-800 px-2 py-0.5 rounded text-xs">node index.js</code> and <code className="bg-zinc-800 px-2 py-0.5 rounded text-xs">ngrok</code> are running on your laptop.
+      {/* Service URL Settings Panel */}
+      {showUrlSettings && (
+        <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-5">
+          <p className="text-sm font-bold text-white mb-1">🔗 WhatsApp Service URL</p>
+          <p className="text-xs text-zinc-400 mb-4">
+            Paste the ngrok URL from your laptop here. Every time you restart ngrok, update this URL.
+            <br/>No need to update GitHub code — just paste and save!
+          </p>
+          <div className="flex gap-3">
+            <input
+              type="text"
+              value={serviceUrlInput}
+              onChange={(e) => setServiceUrlInput(e.target.value)}
+              placeholder="https://xxxx.ngrok-free.app"
+              className="flex-1 rounded-lg border border-zinc-700 bg-zinc-950 text-white text-sm px-4 py-2.5 focus:outline-none focus:border-emerald-500 font-mono"
+            />
+            <button onClick={saveServiceUrl}
+              className="px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-bold transition-colors whitespace-nowrap">
+              💾 Save URL
+            </button>
+            {urlSaved && (
+              <button onClick={clearServiceUrl}
+                className="px-4 py-2.5 rounded-lg border border-zinc-700 text-zinc-400 text-sm hover:border-red-500 hover:text-red-400 transition-colors">
+                ✕
+              </button>
+            )}
+          </div>
+          {urlSaved && (
+            <div className="mt-3 flex items-center gap-2 text-xs text-emerald-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+              Current URL: <span className="font-mono">{serviceUrl}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* No URL Warning */}
+      {!serviceUrl && !showUrlSettings && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400 flex items-center justify-between">
+          <span>⚠️ No service URL set. Click "Set URL" above to add your ngrok URL.</span>
+          <button onClick={() => setShowUrlSettings(true)} className="text-xs font-bold underline">Set Now</button>
+        </div>
+      )}
+
+      {/* Service Error */}
+      {serviceError && serviceUrl && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400 flex items-center justify-between">
+          <span>❌ Cannot reach service at <span className="font-mono text-xs">{serviceUrl}</span></span>
+          <button onClick={() => setShowUrlSettings(true)} className="text-xs font-bold underline whitespace-nowrap ml-4">Update URL</button>
         </div>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-6 items-start">
+
+        {/* LEFT */}
         <div className="flex flex-col gap-5">
+
+          {/* Connection Card */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">📱 Temporary Number</p>
             <div className="flex items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-950 px-4 py-3 mb-4">
@@ -216,7 +318,7 @@ export default function BulkWhatsAppPage() {
                     ? `${connection.phone.name}`
                     : connection.status === 'connecting'
                     ? 'Open WhatsApp → Linked Devices → Scan'
-                    : 'Start node index.js and ngrok on laptop'}
+                    : serviceUrl ? 'Start node index.js and ngrok on laptop' : 'Set ngrok URL above first'}
                 </p>
               </div>
             </div>
@@ -228,17 +330,19 @@ export default function BulkWhatsAppPage() {
                 <div className="text-center text-zinc-400 text-sm">
                   <div className="text-4xl mb-2">✅</div>
                   <div className="text-emerald-600 font-semibold">Connected!</div>
+                  <div className="text-xs mt-1 text-zinc-500">Ready to send bulk messages</div>
                 </div>
               ) : (
                 <div className="text-center text-zinc-400 text-sm">
                   <div className="text-4xl mb-2">📷</div>
                   <div>QR will appear here</div>
-                  <div className="text-xs mt-1">Click Refresh Status</div>
+                  <div className="text-xs mt-1">{serviceUrl ? 'Click Refresh Status' : 'Set ngrok URL first'}</div>
                 </div>
               )}
             </div>
 
-            <button onClick={checkStatus} className="w-full rounded-lg bg-zinc-800 hover:bg-zinc-700 text-white text-sm font-semibold py-2.5 transition-colors mb-2">
+            <button onClick={checkStatus} disabled={!serviceUrl}
+              className="w-full rounded-lg bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-white text-sm font-semibold py-2.5 transition-colors mb-2">
               🔄 Refresh Status
             </button>
             {connection.status === 'connected' && (
@@ -248,6 +352,7 @@ export default function BulkWhatsAppPage() {
             )}
           </div>
 
+          {/* Contacts Card */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">👥 Import Contacts</p>
             <div
@@ -299,12 +404,15 @@ export default function BulkWhatsAppPage() {
           </div>
         </div>
 
+        {/* RIGHT */}
         <div className="flex flex-col gap-5">
+
+          {/* Message Composer */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">✍️ Message Composer</p>
             <p className="text-xs text-zinc-500 mb-2">Click to insert variable:</p>
             <div className="flex flex-wrap gap-2 mb-4">
-              {allVars.map((v) => (
+              {(allVars.length ? allVars : defaultVars).map((v) => (
                 <button key={v} onClick={() => insertVar(`{${v}}`)}
                   className="px-3 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-semibold hover:bg-emerald-500/20 transition-colors">
                   {`{${v}}`}
@@ -336,12 +444,13 @@ export default function BulkWhatsAppPage() {
               </div>
             )}
 
-            <button onClick={startCampaign} disabled={campaign.running}
+            <button onClick={startCampaign} disabled={campaign.running || !serviceUrl}
               className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold py-3 text-sm transition-opacity">
               🚀 {campaign.running ? 'Campaign Running...' : 'Start Bulk Campaign'}
             </button>
           </div>
 
+          {/* Progress */}
           <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-5">
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-4">📊 Campaign Progress</p>
             <div className="grid grid-cols-3 gap-3 mb-4">
