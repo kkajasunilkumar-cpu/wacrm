@@ -7,10 +7,14 @@ interface Contact { [key: string]: string; }
 interface CampaignStatus { running: boolean; total: number; sent: number; failed: number; pending: number; log: LogEntry[]; startedAt: string | null; aborted: boolean; }
 interface LogEntry { number: string; name: string; status: 'sent' | 'failed'; reason?: string; time: string; }
 interface ConnectionStatus { status: 'connected' | 'connecting' | 'disconnected'; hasQR: boolean; phone?: { name: string; id: string }; }
+interface TotalStats { totalSent: number; totalFailed: number; totalMessages: number; campaigns: number; lastUpdated: string; }
 
 const NGROK_HEADERS = { 'ngrok-skip-browser-warning': 'true' };
 const URL_STORAGE_KEY = 'baileys_service_url';
 const PREV_CAMPAIGN_KEY = 'prev_campaign_result';
+const TOTAL_STATS_KEY = 'total_campaign_stats';
+
+const DEFAULT_TOTAL: TotalStats = { totalSent: 0, totalFailed: 0, totalMessages: 0, campaigns: 0, lastUpdated: '' };
 
 export default function BulkWhatsAppPage() {
   const [serviceUrl, setServiceUrl] = useState('');
@@ -26,22 +30,26 @@ export default function BulkWhatsAppPage() {
   const [delayMax, setDelayMax] = useState(15);
   const [campaign, setCampaign] = useState<CampaignStatus>({ running: false, total: 0, sent: 0, failed: 0, pending: 0, log: [], startedAt: null, aborted: false });
   const [prevCampaign, setPrevCampaign] = useState<CampaignStatus | null>(null);
+  const [totalStats, setTotalStats] = useState<TotalStats>(DEFAULT_TOTAL);
   const [isStarting, setIsStarting] = useState(false);
   const [preview, setPreview] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [serviceError, setServiceError] = useState(false);
+  const [campaignCompleted, setCampaignCompleted] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pollRef = useRef<NodeJS.Timeout | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lastSavedCampaignRef = useRef<string | null>(null);
 
-  // Load saved URL on mount
+  // Load saved data on mount
   useEffect(() => {
-    const saved = localStorage.getItem(URL_STORAGE_KEY);
-    if (saved) { setServiceUrl(saved); setServiceUrlInput(saved); setUrlSaved(true); }
+    const savedUrl = localStorage.getItem(URL_STORAGE_KEY);
+    if (savedUrl) { setServiceUrl(savedUrl); setServiceUrlInput(savedUrl); setUrlSaved(true); }
     else { setShowUrlSettings(true); }
-    // Load previous campaign from localStorage
     const prev = localStorage.getItem(PREV_CAMPAIGN_KEY);
     if (prev) setPrevCampaign(JSON.parse(prev));
+    const total = localStorage.getItem(TOTAL_STATS_KEY);
+    if (total) setTotalStats(JSON.parse(total));
   }, []);
 
   const saveServiceUrl = () => {
@@ -49,9 +57,7 @@ export default function BulkWhatsAppPage() {
     if (!url) { alert('Please enter the ngrok URL.'); return; }
     if (!url.startsWith('http')) { alert('URL must start with http:// or https://'); return; }
     localStorage.setItem(URL_STORAGE_KEY, url);
-    setServiceUrl(url);
-    setUrlSaved(true);
-    setShowUrlSettings(false);
+    setServiceUrl(url); setUrlSaved(true); setShowUrlSettings(false);
     alert('URL saved! Click Refresh Status to connect.');
   };
 
@@ -59,6 +65,36 @@ export default function BulkWhatsAppPage() {
     localStorage.removeItem(URL_STORAGE_KEY);
     setServiceUrl(''); setServiceUrlInput(''); setUrlSaved(false); setShowUrlSettings(true);
     setConnection({ status: 'disconnected', hasQR: false }); setQrImage(null);
+  };
+
+  const resetTotalStats = () => {
+    if (!confirm('Reset all total statistics? This cannot be undone.')) return;
+    localStorage.removeItem(TOTAL_STATS_KEY);
+    localStorage.removeItem(PREV_CAMPAIGN_KEY);
+    setTotalStats(DEFAULT_TOTAL);
+    setPrevCampaign(null);
+  };
+
+  // Update total stats when campaign completes
+  const updateTotalStats = (completedCampaign: CampaignStatus) => {
+    const key = completedCampaign.startedAt || '';
+    if (lastSavedCampaignRef.current === key) return; // Avoid double counting
+    lastSavedCampaignRef.current = key;
+
+    const current = localStorage.getItem(TOTAL_STATS_KEY);
+    const existing: TotalStats = current ? JSON.parse(current) : DEFAULT_TOTAL;
+    const updated: TotalStats = {
+      totalSent: existing.totalSent + completedCampaign.sent,
+      totalFailed: existing.totalFailed + completedCampaign.failed,
+      totalMessages: existing.totalMessages + completedCampaign.total,
+      campaigns: existing.campaigns + 1,
+      lastUpdated: new Date().toISOString(),
+    };
+    localStorage.setItem(TOTAL_STATS_KEY, JSON.stringify(updated));
+    setTotalStats(updated);
+    // Save as previous campaign
+    localStorage.setItem(PREV_CAMPAIGN_KEY, JSON.stringify(completedCampaign));
+    setPrevCampaign(completedCampaign);
   };
 
   // Polling
@@ -70,10 +106,9 @@ export default function BulkWhatsAppPage() {
         const data: CampaignStatus = await res.json();
         setCampaign(data);
         setIsStarting(false);
-        // When campaign completes, save as previous
         if (!data.running && data.total > 0) {
-          localStorage.setItem(PREV_CAMPAIGN_KEY, JSON.stringify(data));
-          setPrevCampaign(data);
+          updateTotalStats(data);
+          setCampaignCompleted(true);
           clearInterval(pollRef.current!);
           pollRef.current = null;
         }
@@ -101,7 +136,6 @@ export default function BulkWhatsAppPage() {
     }
   }, []);
 
-  // Auto-load campaign + start polling when URL set
   useEffect(() => {
     if (!serviceUrl) return;
     const loadCampaign = async () => {
@@ -110,11 +144,6 @@ export default function BulkWhatsAppPage() {
         const data: CampaignStatus = await res.json();
         setCampaign(data);
         if (data.running) startPolling(serviceUrl);
-        // Save completed campaign as previous
-        if (!data.running && data.total > 0) {
-          localStorage.setItem(PREV_CAMPAIGN_KEY, JSON.stringify(data));
-          setPrevCampaign(data);
-        }
       } catch {}
     };
     loadCampaign();
@@ -168,7 +197,6 @@ export default function BulkWhatsAppPage() {
     setPreview(p);
   };
 
-  // Campaign
   const startCampaign = async () => {
     if (!serviceUrl) { alert('Please save the service URL first.'); return; }
     if (!message.trim()) { alert('Please write a message.'); return; }
@@ -176,6 +204,7 @@ export default function BulkWhatsAppPage() {
     if (connection.status !== 'connected') { alert('WhatsApp not connected. Scan QR first.'); return; }
     if (!confirm(`Start sending to ${contacts.length} contacts?`)) return;
     setIsStarting(true);
+    setCampaignCompleted(false);
     try {
       const res = await fetch(`${serviceUrl}/bulk-send`, {
         method: 'POST',
@@ -244,6 +273,46 @@ export default function BulkWhatsAppPage() {
         <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400 flex items-center justify-between">
           <span>❌ Cannot reach service. Check node index.js and ngrok are running.</span>
           <button onClick={() => setShowUrlSettings(true)} className="text-xs font-bold underline ml-4 whitespace-nowrap">Update URL</button>
+        </div>
+      )}
+
+      {/* ── TOTAL STATS BAR ── */}
+      {totalStats.campaigns > 0 && (
+        <div className="rounded-2xl border border-zinc-700 bg-gradient-to-r from-zinc-900 to-zinc-800 p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <p className="text-sm font-bold text-white">📈 Total Campaign Stats</p>
+              <p className="text-xs text-zinc-500 mt-0.5">{totalStats.campaigns} campaign{totalStats.campaigns > 1 ? 's' : ''} sent so far{totalStats.lastUpdated ? ` · Last: ${new Date(totalStats.lastUpdated).toLocaleDateString()}` : ''}</p>
+            </div>
+            <button onClick={resetTotalStats} className="text-xs text-zinc-600 hover:text-red-400 transition-colors">🗑️ Reset</button>
+          </div>
+          <div className="grid grid-cols-4 gap-3">
+            {[
+              { label: 'Total Sent', value: totalStats.totalSent, color: 'text-emerald-400', bg: 'bg-emerald-500/10 border-emerald-500/20', icon: '✅' },
+              { label: 'Total Failed', value: totalStats.totalFailed, color: 'text-red-400', bg: 'bg-red-500/10 border-red-500/20', icon: '❌' },
+              { label: 'Total Messages', value: totalStats.totalMessages, color: 'text-white', bg: 'bg-zinc-800 border-zinc-700', icon: '📨' },
+              { label: 'Campaigns', value: totalStats.campaigns, color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/20', icon: '🚀' },
+            ].map(({ label, value, color, bg, icon }) => (
+              <div key={label} className={`rounded-xl border ${bg} p-4 text-center`}>
+                <div className="text-lg mb-1">{icon}</div>
+                <div className={`text-2xl font-bold ${color}`}>{value}</div>
+                <div className="text-xs text-zinc-500 mt-1 leading-tight">{label}</div>
+              </div>
+            ))}
+          </div>
+          {/* Success rate bar */}
+          {totalStats.totalMessages > 0 && (
+            <div className="mt-4">
+              <div className="flex justify-between text-xs text-zinc-500 mb-1.5">
+                <span>Success Rate</span>
+                <span className="text-emerald-400 font-semibold">{Math.round((totalStats.totalSent / totalStats.totalMessages) * 100)}%</span>
+              </div>
+              <div className="h-2 rounded-full bg-zinc-700 overflow-hidden">
+                <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-500 transition-all duration-500"
+                  style={{ width: `${Math.round((totalStats.totalSent / totalStats.totalMessages) * 100)}%` }} />
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -345,10 +414,10 @@ export default function BulkWhatsAppPage() {
               ))}
             </div>
             <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider block mb-1.5">Message Template</label>
-            <textarea ref={textareaRef} value={message} onChange={(e) => setMessage(e.target.value)} rows={8}
+            <textarea ref={textareaRef} value={message} onChange={(e) => setMessage(e.target.value)} rows={7}
               placeholder={`Hi {name} 👋\n\nWe noticed your interest in {course}.\n\nKBEduTech special admissions 2024-25!\n✅ Expert faculty\n✅ Proven track record\n\nReply to know more!\n\n— KBEduTech Team`}
               className="w-full rounded-xl border border-zinc-700 bg-zinc-950 text-white text-sm px-4 py-3 focus:outline-none focus:border-emerald-500 resize-none mb-3" />
-            <div className="flex items-center justify-between mb-5">
+            <div className="flex items-center justify-between mb-4">
               <span className="text-xs text-zinc-500">{message.length} characters</span>
               <button onClick={showPreviewFn} className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold">👁️ Preview</button>
             </div>
@@ -368,10 +437,10 @@ export default function BulkWhatsAppPage() {
           </div>
 
           {/* Previous Campaign */}
-          {prevCampaign && !campaign.running && !isStarting && (
+          {prevCampaign && !isRunning && (
             <div className="rounded-2xl border border-zinc-700 bg-zinc-900 p-5">
-              <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">📋 Previous Campaign Results</p>
-              <div className="grid grid-cols-3 gap-3 mb-3">
+              <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">📋 Previous Campaign</p>
+              <div className="grid grid-cols-3 gap-3 mb-2">
                 {[{ label: 'Sent', value: prevCampaign.sent, color: 'text-emerald-400' }, { label: 'Failed', value: prevCampaign.failed, color: 'text-red-400' }, { label: 'Total', value: prevCampaign.total, color: 'text-zinc-300' }].map(({ label, value, color }) => (
                   <div key={label} className="rounded-xl border border-zinc-800 bg-zinc-950 p-3 text-center">
                     <div className={`text-2xl font-bold ${color}`}>{value}</div>
@@ -379,9 +448,7 @@ export default function BulkWhatsAppPage() {
                   </div>
                 ))}
               </div>
-              {prevCampaign.startedAt && (
-                <p className="text-xs text-zinc-600">Sent on: {new Date(prevCampaign.startedAt).toLocaleString()}</p>
-              )}
+              {prevCampaign.startedAt && <p className="text-xs text-zinc-600">Sent on: {new Date(prevCampaign.startedAt).toLocaleString()}</p>}
             </div>
           )}
 
@@ -391,9 +458,8 @@ export default function BulkWhatsAppPage() {
               <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">📊 Current Campaign</p>
               {isStarting && <span className="text-xs text-amber-400 animate-pulse font-semibold">⏳ Starting...</span>}
               {campaign.running && <span className="text-xs text-emerald-400 animate-pulse font-semibold">🔴 Live</span>}
-              {!campaign.running && campaign.total > 0 && !isStarting && <span className="text-xs text-zinc-500 font-semibold">✅ Complete</span>}
+              {campaignCompleted && !campaign.running && !isStarting && <span className="text-xs text-emerald-500 font-semibold">✅ Complete</span>}
             </div>
-
             <div className="grid grid-cols-3 gap-3 mb-4">
               {[{ label: 'Sent', value: campaign.sent, color: 'text-emerald-400' }, { label: 'Failed', value: campaign.failed, color: 'text-red-400' }, { label: 'Pending', value: campaign.pending, color: 'text-amber-400' }].map(({ label, value, color }) => (
                 <div key={label} className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-center">
@@ -402,33 +468,27 @@ export default function BulkWhatsAppPage() {
                 </div>
               ))}
             </div>
-
             <div className="h-2 rounded-full bg-zinc-800 overflow-hidden mb-2">
-              <div className={`h-full rounded-full transition-all duration-500 ${campaign.running ? 'bg-gradient-to-r from-emerald-500 to-teal-500' : 'bg-gradient-to-r from-emerald-600 to-teal-600'}`}
-                style={{ width: `${isStarting ? 2 : pct}%` }} />
+              <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-teal-500 transition-all duration-500" style={{ width: `${isStarting ? 2 : pct}%` }} />
             </div>
             <div className="flex justify-between text-xs text-zinc-500 mb-4">
               <span>
                 {isStarting ? '⏳ Preparing to send...'
                   : campaign.running ? `🔴 Sending... (${campaign.sent + campaign.failed}/${campaign.total})`
-                  : campaign.total > 0 ? `✅ Complete — ${campaign.sent} sent, ${campaign.failed} failed`
-                  : 'No campaign running'}
+                  : campaign.total > 0 ? `✅ ${campaign.sent} sent, ${campaign.failed} failed out of ${campaign.total}`
+                  : 'No campaign running yet'}
               </span>
               <span>{isStarting ? '' : `${pct}%`}</span>
             </div>
-
             {campaign.running && (
               <button onClick={abortCampaign} className="w-full rounded-xl border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-semibold py-2.5 text-sm transition-colors mb-4">
                 ⛔ Abort Campaign
               </button>
             )}
-
             <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-3">📋 Send Log</p>
             <div className="rounded-xl border border-zinc-800 bg-zinc-950 max-h-64 overflow-y-auto">
               {campaign.log.length === 0 ? (
-                <div className="text-center py-8 text-zinc-600 text-sm">
-                  {isStarting ? '⏳ Waiting for first message...' : 'No messages sent yet'}
-                </div>
+                <div className="text-center py-8 text-zinc-600 text-sm">{isStarting ? '⏳ Waiting for first message...' : 'No messages sent yet'}</div>
               ) : (
                 [...campaign.log].reverse().map((entry, i) => (
                   <div key={i} className="flex items-center gap-3 px-4 py-2.5 border-b border-zinc-800 last:border-0">
