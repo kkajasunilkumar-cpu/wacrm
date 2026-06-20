@@ -34,7 +34,7 @@ interface ConnectionStatus {
 }
 
 // ── Config ─────────────────────────────────────────────────────────────────
-const BAILEYS_URL = '/api/baileys';
+const BAILEYS_URL = 'https://baileys-service-production-802b.up.railway.app';
 
 // ── Main  Component ─────────────────────────────────────────────────────────
 export default function BulkWhatsAppPage() {
