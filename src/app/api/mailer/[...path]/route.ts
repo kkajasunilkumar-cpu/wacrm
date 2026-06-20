@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-const MAILER_URL = 'http://localhost:3002'
+const MAILER_URL = 'http://localhost:3003'
 
 export async function GET(
   request: NextRequest,
